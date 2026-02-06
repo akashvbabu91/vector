@@ -519,7 +519,7 @@ impl PrometheusExporter {
                 // For incremental metrics, return as-is to be accumulated atomically later.
                 // We don't accumulate here to avoid a race condition between reading the current
                 // value under READ lock and storing the accumulated value under WRITE lock.
-                Some(new_metric.into_absolute())
+                Some(new_metric)
             }
         }
     }
