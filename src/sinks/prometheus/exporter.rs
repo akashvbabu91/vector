@@ -1,49 +1,49 @@
 use std::{
     convert::Infallible,
     hash::Hash,
-    mem::{discriminant, Discriminant},
+    mem::{Discriminant, discriminant},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
-use base64::prelude::{Engine as _, BASE64_STANDARD};
-use futures::{future, stream::BoxStream, FutureExt, StreamExt};
+use base64::prelude::{BASE64_STANDARD, Engine as _};
+use futures::{FutureExt, StreamExt, future, stream::BoxStream};
 use hyper::{
+    Body, Method, Request, Response, Server, StatusCode,
     body::HttpBody,
     header::HeaderValue,
     service::{make_service_fn, service_fn},
-    Body, Method, Request, Response, Server, StatusCode,
 };
-use indexmap::{map::Entry, IndexMap};
+use indexmap::{IndexMap, map::Entry};
 use serde_with::serde_as;
 use snafu::Snafu;
 use stream_cancel::{Trigger, Tripwire};
 use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
 use tracing::{Instrument, Span};
-use vector_lib::configurable::configurable_component;
 use vector_lib::{
+    ByteSizeOf, EstimatedJsonEncodedSizeOf,
+    configurable::configurable_component,
     internal_event::{
         ByteSize, BytesSent, CountByteSize, EventsSent, InternalEventHandle as _, Output, Protocol,
         Registered,
     },
-    ByteSizeOf, EstimatedJsonEncodedSizeOf,
 };
 
 use super::collector::{MetricCollector, StringCollector};
 use crate::{
     config::{AcknowledgementsConfig, GenerateConfig, Input, Resource, SinkConfig, SinkContext},
     event::{
-        metric::{Metric, MetricData, MetricKind, MetricSeries, MetricValue},
         Event, EventStatus, Finalizable,
+        metric::{Metric, MetricData, MetricKind, MetricSeries, MetricValue},
     },
-    http::{build_http_trace_layer, Auth},
+    http::{Auth, build_http_trace_layer},
     internal_events::PrometheusNormalizationError,
     sinks::{
-        util::{statistic::validate_quantiles, StreamSink},
         Healthcheck, VectorSink,
+        util::{StreamSink, statistic::validate_quantiles},
     },
     tls::{MaybeTlsSettings, TlsEnableableConfig},
 };
@@ -318,19 +318,20 @@ fn authorized<T: HttpBody>(req: &Request<T>, auth: &Option<Auth>) -> bool {
                         "Basic {}",
                         BASE64_STANDARD.encode(format!("{}:{}", user, password.inner()))
                     )
-                    .as_str(),
+                        .as_str(),
                 )),
                 Auth::Bearer { token } => Some(HeaderValue::from_str(
                     format!("Bearer {}", token.inner()).as_str(),
                 )),
+                Auth::Custom { value } => Some(HeaderValue::from_str(value)),
                 #[cfg(feature = "aws-core")]
                 _ => None,
             };
 
-            if let Some(Ok(encoded_credentials)) = encoded_credentials {
-                if auth_header == encoded_credentials {
-                    return true;
-                }
+            if let Some(Ok(encoded_credentials)) = encoded_credentials
+                && auth_header == encoded_credentials
+            {
+                return true;
             }
         }
     } else {
@@ -482,7 +483,11 @@ impl PrometheusExporter {
         Ok(())
     }
 
-    fn normalize(&mut self, metric: Metric) -> Option<Metric> {
+    /// Preprocesses a metric by converting distributions to the appropriate format.
+    ///
+    /// For distribution metrics, converts them to either histograms or summaries based on
+    /// configuration. Absolute and incremental metrics are returned as-is.
+    fn preprocess_metric(&mut self, metric: Metric) -> Option<Metric> {
         let new_metric = match metric.value() {
             MetricValue::Distribution { .. } => {
                 // Convert the distribution as-is, and then absolute-ify it.
@@ -512,21 +517,10 @@ impl PrometheusExporter {
         match new_metric.kind() {
             MetricKind::Absolute => Some(new_metric),
             MetricKind::Incremental => {
-                let metrics = self.metrics.read().expect(LOCK_FAILED);
-                let metric_ref = MetricRef::from_metric(&new_metric);
-
-                if let Some(existing) = metrics.get(&metric_ref) {
-                    let mut current = existing.0.value().clone();
-                    if current.add(new_metric.value()) {
-                        // If we were able to add to the existing value (i.e. they were compatible),
-                        // return the result as an absolute metric.
-                        return Some(new_metric.with_value(current).into_absolute());
-                    }
-                }
-
-                // Otherwise, if we didn't have an existing value or we did and it was not
-                // compatible with the new value, simply return the new value as absolute.
-                Some(new_metric.into_absolute())
+                // For incremental metrics, return as-is to be accumulated atomically later.
+                // We don't accumulate here to avoid a race condition between reading the current
+                // value under READ lock and storing the accumulated value under WRITE lock.
+                Some(new_metric)
             }
         }
     }
@@ -563,26 +557,47 @@ impl StreamSink<Event> for PrometheusExporter {
             let mut metric = event.into_metric();
             let finalizers = metric.take_finalizers();
 
-            match self.normalize(metric) {
-                Some(normalized) => {
-                    let normalized = if self.config.suppress_timestamp {
-                        normalized.with_timestamp(None)
-                    } else {
-                        normalized
-                    };
+            match self.preprocess_metric(metric) {
+                Some(mut preprocessed_metric) => {
+                    if self.config.suppress_timestamp {
+                        preprocessed_metric = preprocessed_metric.with_timestamp(None);
+                    }
 
-                    // We have a normalized metric, in absolute form.  If we're already aware of this
-                    // metric, update its expiration deadline, otherwise, start tracking it.
+                    // Handle metric storage. For incremental metrics, we must accumulate
+                    // atomically under write lock to prevent race conditions.
                     let mut metrics = self.metrics.write().expect(LOCK_FAILED);
+                    let metric_ref = MetricRef::from_metric(&preprocessed_metric);
 
-                    match metrics.entry(MetricRef::from_metric(&normalized)) {
+                    match metrics.entry(metric_ref) {
                         Entry::Occupied(mut entry) => {
-                            let (data, metadata) = entry.get_mut();
-                            *data = normalized;
+                            let (existing_metric, metadata) = entry.get_mut();
+
+                            match preprocessed_metric.kind() {
+                                MetricKind::Incremental => {
+                                    // Atomically read current value, add increment, and store
+                                    let mut accumulated_value = existing_metric.value().clone();
+                                    if accumulated_value.add(preprocessed_metric.value()) {
+                                        // Successfully accumulated - store as absolute
+                                        *existing_metric = preprocessed_metric.with_value(accumulated_value).into_absolute();
+                                    } else {
+                                        // Incompatible metric types - treat increment as absolute
+                                        *existing_metric = preprocessed_metric.into_absolute();
+                                    }
+                                }
+                                _ => {
+                                    // For all other metric kinds (currently just Absolute), replace directly
+                                    *existing_metric = preprocessed_metric;
+                                }
+                            }
                             metadata.refresh();
                         }
                         Entry::Vacant(entry) => {
-                            entry.insert((normalized, MetricMetadata::new(flush_period)));
+                            // First occurrence of this metric
+                            let stored_metric = match preprocessed_metric.kind() {
+                                MetricKind::Incremental => preprocessed_metric.into_absolute(),
+                                _ => preprocessed_metric,
+                            };
+                            entry.insert((stored_metric, MetricMetadata::new(flush_period)));
                         }
                     }
                     finalizers.update_status(EventStatus::Delivered);
@@ -600,12 +615,13 @@ impl StreamSink<Event> for PrometheusExporter {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+
     use chrono::{Duration, Utc};
     use flate2::read::GzDecoder;
     use futures::stream;
     use indoc::indoc;
     use similar_asserts::assert_eq;
-    use std::io::Read;
     use tokio::{sync::oneshot::error::TryRecvError, time};
     use vector_lib::{
         event::{MetricTags, StatisticKind},
@@ -621,8 +637,9 @@ mod tests {
         http::HttpClient,
         sinks::prometheus::{distribution_to_agg_histogram, distribution_to_ddsketch},
         test_util::{
-            components::{run_and_assert_sink_compliance, SINK_TAGS},
-            next_addr, random_string, trace_init,
+            addr::next_addr,
+            components::{SINK_TAGS, run_and_assert_sink_compliance},
+            random_string, trace_init,
         },
         tls::MaybeTlsSettings,
     };
@@ -785,7 +802,7 @@ mod tests {
             events,
             false,
         )
-        .await;
+            .await;
 
         assert!(response_result.is_err());
         assert_eq!(response_result.unwrap_err(), StatusCode::UNAUTHORIZED);
@@ -901,7 +918,7 @@ mod tests {
         let client_settings = MaybeTlsSettings::from_config(tls_config.as_ref(), false).unwrap();
         let proto = client_settings.http_protocol_name();
 
-        let address = next_addr();
+        let (_guard, address) = next_addr();
         let config = PrometheusExporterConfig {
             address,
             tls: tls_config,
@@ -951,15 +968,18 @@ mod tests {
         assert!(result.status().is_success());
 
         if encoding.is_some() {
-            assert!(result
-                .headers()
-                .contains_key(http::header::CONTENT_ENCODING));
+            assert!(
+                result
+                    .headers()
+                    .contains_key(http::header::CONTENT_ENCODING)
+            );
         }
 
         let body = result.into_body();
-        let bytes = hyper::body::to_bytes(body)
+        let bytes = http_body::Body::collect(body)
             .await
-            .expect("Reading body failed");
+            .expect("Reading body failed")
+            .to_bytes();
 
         sink_handle.await.unwrap();
 
@@ -986,7 +1006,7 @@ mod tests {
         let client_settings = MaybeTlsSettings::from_config(None, false).unwrap();
         let proto = client_settings.http_protocol_name();
 
-        let address = next_addr();
+        let (_guard, address) = next_addr();
         let config = PrometheusExporterConfig {
             address,
             auth: server_auth_config,
@@ -1036,9 +1056,10 @@ mod tests {
         }
 
         let body = result.into_body();
-        let bytes = hyper::body::to_bytes(body)
+        let bytes = http_body::Body::collect(body)
             .await
-            .expect("Reading body failed");
+            .expect("Reading body failed")
+            .to_bytes();
         let result = String::from_utf8(bytes.to_vec()).unwrap();
 
         sink_handle.await.unwrap();
@@ -1102,8 +1123,9 @@ mod tests {
 
     #[tokio::test]
     async fn sink_absolute() {
+        let (_guard, address) = next_addr();
         let config = PrometheusExporterConfig {
-            address: next_addr(), // Not actually bound, just needed to fill config
+            address,
             tls: None,
             ..Default::default()
         };
@@ -1115,7 +1137,7 @@ mod tests {
             MetricKind::Absolute,
             MetricValue::Counter { value: 32. },
         )
-        .with_tags(Some(metric_tags!("tag1" => "value1")));
+            .with_tags(Some(metric_tags!("tag1" => "value1")));
 
         let m2 = m1.clone().with_tags(Some(metric_tags!("tag1" => "value2")));
 
@@ -1155,8 +1177,9 @@ mod tests {
         // are the same -- without loss of accuracy.
 
         // This expects that the default for the sink is to render distributions as aggregated histograms.
+        let (_guard, address) = next_addr();
         let config = PrometheusExporterConfig {
-            address: next_addr(), // Not actually bound, just needed to fill config
+            address,
             tls: None,
             ..Default::default()
         };
@@ -1183,7 +1206,7 @@ mod tests {
             },
         );
 
-        let metrics = vec![
+        let metrics = [
             base_summary_metric.clone(),
             base_summary_metric
                 .clone()
@@ -1274,8 +1297,9 @@ mod tests {
         //
         // The render code is actually what will end up rendering those sketches as aggregated
         // summaries in the scrape output.
+        let (_guard, address) = next_addr();
         let config = PrometheusExporterConfig {
-            address: next_addr(), // Not actually bound, just needed to fill config
+            address,
             tls: None,
             distributions_as_summaries: true,
             ..Default::default()
@@ -1302,7 +1326,7 @@ mod tests {
             },
         );
 
-        let metrics = vec![
+        let metrics = [
             base_summary_metric.clone(),
             base_summary_metric
                 .clone()
@@ -1383,8 +1407,9 @@ mod tests {
 
         // This test ensures that this normalization works correctly when applied to a mix of both
         // Incremental and Absolute inputs.
+        let (_guard, address) = next_addr();
         let config = PrometheusExporterConfig {
-            address: next_addr(), // Not actually bound, just needed to fill config
+            address,
             tls: None,
             ..Default::default()
         };
@@ -1403,7 +1428,7 @@ mod tests {
             MetricValue::Gauge { value: -10.0 },
         );
 
-        let metrics = vec![
+        let metrics = [
             base_absolute_gauge_metric.clone(),
             base_absolute_gauge_metric
                 .clone()
@@ -1462,7 +1487,7 @@ mod integration_tests {
         config::ProxyConfig,
         http::HttpClient,
         test_util::{
-            components::{run_and_assert_sink_compliance, SINK_TAGS},
+            components::{SINK_TAGS, run_and_assert_sink_compliance},
             trace_init,
         },
     };
@@ -1486,9 +1511,10 @@ mod integration_tests {
             .send(request)
             .await
             .expect("Could not send request");
-        let result = hyper::body::to_bytes(result.into_body())
+        let result = http_body::Body::collect(result.into_body())
             .await
-            .expect("Error fetching body");
+            .expect("Error fetching body")
+            .to_bytes();
         String::from_utf8_lossy(&result).to_string()
     }
 
@@ -1507,9 +1533,10 @@ mod integration_tests {
             .send(request)
             .await
             .expect("Could not fetch query");
-        let result = hyper::body::to_bytes(result.into_body())
+        let result = http_body::Body::collect(result.into_body())
             .await
-            .expect("Error fetching body");
+            .expect("Error fetching body")
+            .to_bytes();
         let result = String::from_utf8_lossy(&result);
         serde_json::from_str(result.as_ref()).expect("Invalid JSON from prometheus")
     }
@@ -1545,7 +1572,7 @@ mod integration_tests {
             })),
             &SINK_TAGS,
         )
-        .await;
+            .await;
 
         // Now try to download them from prometheus
         let result = prometheus_query(&name).await;
