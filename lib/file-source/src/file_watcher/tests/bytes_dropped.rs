@@ -395,3 +395,69 @@ fn test_bytes_dropped_file_grows_after_watcher_created() {
     // We read 12 bytes, initial size was 12, so bytes_dropped = 0
     assert_eq!(fw.get_bytes_dropped(), 0);
 }
+
+/// Test: get_unwatch_info returns consistent data
+#[test]
+fn test_get_unwatch_info_consistency() {
+    let dir = tempfile::TempDir::new().expect("could not create tempdir");
+    let path = dir.path().join("test.log");
+
+    // Create file with known content
+    let content = "line1\nline2\nline3\n"; // 18 bytes
+    fs::write(&path, content).expect("could not write file");
+
+    let mut fw = FileWatcher::new(
+        path.clone(),
+        ReadFrom::Beginning,
+        None,
+        100_000,
+        Bytes::from("\n"),
+    )
+    .expect("must be able to create");
+
+    // Read one line
+    match fw.read_line() {
+        Ok(RawLineResult {
+            raw_line: Some(_), ..
+        }) => {}
+        _ => panic!("expected to read a line"),
+    }
+
+    // Get unwatch info
+    let info = fw.get_unwatch_info();
+
+    // Verify consistency with individual getters
+    assert_eq!(info.path, path);
+    assert_eq!(info.bytes_dropped, fw.get_bytes_dropped());
+    assert_eq!(info.reached_eof, fw.reached_eof());
+    assert_eq!(info.bytes_dropped, 12); // 18 - 6
+    assert!(!info.reached_eof);
+}
+
+/// Test: get_unwatch_info after reaching EOF
+#[test]
+fn test_get_unwatch_info_at_eof() {
+    let dir = tempfile::TempDir::new().expect("could not create tempdir");
+    let path = dir.path().join("test.log");
+
+    let content = "line1\nline2\n";
+    fs::write(&path, content).expect("could not write file");
+
+    let mut fw = FileWatcher::new(
+        path.clone(),
+        ReadFrom::Beginning,
+        None,
+        100_000,
+        Bytes::from("\n"),
+    )
+    .expect("must be able to create");
+
+    // Read all lines
+    read_all_lines(&mut fw);
+
+    let info = fw.get_unwatch_info();
+
+    assert_eq!(info.path, path);
+    assert_eq!(info.bytes_dropped, 0);
+    assert!(info.reached_eof);
+}

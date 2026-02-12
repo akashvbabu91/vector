@@ -198,12 +198,12 @@ where
                                     path = ?path,
                                     old_path = ?watcher.path
                                 );
-                                if let Ok(Some(inode_change)) = watcher.update_path(path) {
+                                if let Ok(Some(unwatch_info)) = watcher.update_path(path) {
                                     // Inode changed - emit metrics for the old file
                                     self.emitter.emit_file_unwatched(
-                                        &inode_change.old_path,
-                                        inode_change.reached_eof,
-                                        inode_change.bytes_dropped,
+                                        &unwatch_info.path,
+                                        unwatch_info.reached_eof,
+                                        unwatch_info.bytes_dropped,
                                     );
                                 }
                             } else {
@@ -223,12 +223,12 @@ where
                                             new_modified_time = ?new_modified_time,
                                             old_modified_time = ?old_modified_time,
                                         );
-                                        if let Ok(Some(inode_change)) = watcher.update_path(path) {
+                                        if let Ok(Some(unwatch_info)) = watcher.update_path(path) {
                                             // Inode changed - emit metrics for the old file
                                             self.emitter.emit_file_unwatched(
-                                                &inode_change.old_path,
-                                                inode_change.reached_eof,
-                                                inode_change.bytes_dropped,
+                                                &unwatch_info.path,
+                                                unwatch_info.reached_eof,
+                                                unwatch_info.bytes_dropped,
                                             );
                                         }
                                     }
@@ -352,10 +352,11 @@ where
             // If the FileWatcher is dead we don't retain it; it will be deallocated.
             fp_map.retain(|file_id, watcher| {
                 if watcher.dead() {
+                    let unwatch_info = watcher.get_unwatch_info();
                     self.emitter.emit_file_unwatched(
-                        &watcher.path,
-                        watcher.reached_eof(),
-                        watcher.get_bytes_dropped(),
+                        &unwatch_info.path,
+                        unwatch_info.reached_eof,
+                        unwatch_info.bytes_dropped,
                     );
                     checkpoints.set_dead(*file_id);
                     false

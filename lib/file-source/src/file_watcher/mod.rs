@@ -36,16 +36,19 @@ pub struct RawLineResult {
     pub discarded_for_size_and_truncated: Vec<BytesMut>,
 }
 
-/// Information about a file that was being watched before an inode change.
-/// This is returned by `update_path()` when the file's inode changes, indicating
-/// that the watcher is now tracking a different underlying file.
-#[derive(Debug)]
-pub struct FileInodeChangeInfo {
-    /// The path of the old file
-    pub old_path: PathBuf,
-    /// Number of bytes that were not read (dropped) from the old file
+/// Information about a file when it is unwatched.
+/// Used for metric emission when Vector stops watching a file for any reason:
+/// - File deleted
+/// - File rotated and old file removed
+/// - Inode changed (file replaced)
+/// - `rotate_wait` timeout
+#[derive(Debug, Clone)]
+pub struct FileUnwatchInfo {
+    /// The path of the file
+    pub path: PathBuf,
+    /// Number of bytes that were not read (dropped) from the file
     pub bytes_dropped: u64,
-    /// Whether the old file reached EOF before the inode change
+    /// Whether the file reached EOF before being unwatched
     pub reached_eof: bool,
 }
 
@@ -190,23 +193,19 @@ impl FileWatcher {
     /// Update the path being watched.
     ///
     /// If the file at the new path has a different inode, this indicates the file
-    /// was replaced (not just renamed). In this case, returns `FileInodeChangeInfo`
+    /// was replaced (not just renamed). In this case, returns `FileUnwatchInfo`
     /// containing metrics about the old file so the caller can emit appropriate events.
     ///
     /// When an inode change occurs, the tracking metrics (initial_file_size,
     /// initial_file_position) are reset for the new file.
-    pub fn update_path(&mut self, path: PathBuf) -> io::Result<Option<FileInodeChangeInfo>> {
+    pub fn update_path(&mut self, path: PathBuf) -> io::Result<Option<FileUnwatchInfo>> {
         let file_handle = File::open(&path)?;
         let new_devno = file_handle.portable_dev()?;
         let new_inode = file_handle.portable_ino()?;
 
-        let inode_change_info = if (new_devno, new_inode) != (self.devno, self.inode) {
+        let unwatch_info = if (new_devno, new_inode) != (self.devno, self.inode) {
             // Capture metrics from the old file before switching
-            let old_info = FileInodeChangeInfo {
-                old_path: self.path.clone(),
-                bytes_dropped: self.get_bytes_dropped(),
-                reached_eof: self.reached_eof,
-            };
+            let old_info = self.get_unwatch_info();
 
             let mut reader = io::BufReader::new(fs::File::open(&path)?);
             let gzipped = is_gzipped(&mut reader)?;
@@ -252,7 +251,7 @@ impl FileWatcher {
         };
 
         self.path = path;
-        Ok(inode_change_info)
+        Ok(unwatch_info)
     }
 
     pub fn set_file_findable(&mut self, f: bool) {
@@ -284,6 +283,16 @@ impl FileWatcher {
     /// Note: For actively written files, actual dropped bytes may be higher than this value.
     pub fn get_bytes_dropped(&self) -> u64 {
         self.initial_file_size.saturating_sub(self.file_position)
+    }
+
+    /// Returns information about this file for metric emission when unwatching.
+    /// This provides a consistent interface for all unwatch scenarios.
+    pub fn get_unwatch_info(&self) -> FileUnwatchInfo {
+        FileUnwatchInfo {
+            path: self.path.clone(),
+            bytes_dropped: self.get_bytes_dropped(),
+            reached_eof: self.reached_eof,
+        }
     }
 
     /// Read a single line from the underlying file
@@ -387,6 +396,7 @@ impl FileWatcher {
     }
 
     #[inline]
+    #[cfg(test)]
     pub fn reached_eof(&self) -> bool {
         self.reached_eof
     }
