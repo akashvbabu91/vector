@@ -36,6 +36,19 @@ pub struct RawLineResult {
     pub discarded_for_size_and_truncated: Vec<BytesMut>,
 }
 
+/// Information about a file that was being watched before an inode change.
+/// This is returned by `update_path()` when the file's inode changes, indicating
+/// that the watcher is now tracking a different underlying file.
+#[derive(Debug)]
+pub struct FileInodeChangeInfo {
+    /// The path of the old file
+    pub old_path: PathBuf,
+    /// Number of bytes that were not read (dropped) from the old file
+    pub bytes_dropped: u64,
+    /// Whether the old file reached EOF before the inode change
+    pub reached_eof: bool,
+}
+
 /// The `FileWatcher` struct defines the polling based state machine which reads
 /// from a file path, transparently updating the underlying file descriptor when
 /// the file has been rolled over, as is common for logs.
@@ -58,6 +71,12 @@ pub struct FileWatcher {
     max_line_bytes: usize,
     line_delimiter: Bytes,
     buf: BytesMut,
+    /// The file size when the watcher was created. Used to calculate
+    /// bytes remaining when the file is unwatched.
+    initial_file_size: u64,
+    /// The file position when the watcher started reading. This differs from 0
+    /// when resuming from a checkpoint or when `read_from: end` is configured.
+    initial_file_position: FilePosition,
 }
 
 impl FileWatcher {
@@ -146,6 +165,8 @@ impl FileWatcher {
             .and_then(|diff| Instant::now().checked_sub(diff))
             .unwrap_or_else(Instant::now);
 
+        let initial_file_size = metadata.len();
+
         Ok(FileWatcher {
             path,
             findable: true,
@@ -161,30 +182,77 @@ impl FileWatcher {
             max_line_bytes,
             line_delimiter,
             buf: BytesMut::new(),
+            initial_file_size,
+            initial_file_position: file_position,
         })
     }
 
-    pub fn update_path(&mut self, path: PathBuf) -> io::Result<()> {
+    /// Update the path being watched.
+    ///
+    /// If the file at the new path has a different inode, this indicates the file
+    /// was replaced (not just renamed). In this case, returns `FileInodeChangeInfo`
+    /// containing metrics about the old file so the caller can emit appropriate events.
+    ///
+    /// When an inode change occurs, the tracking metrics (initial_file_size,
+    /// initial_file_position) are reset for the new file.
+    pub fn update_path(&mut self, path: PathBuf) -> io::Result<Option<FileInodeChangeInfo>> {
         let file_handle = File::open(&path)?;
-        if (file_handle.portable_dev()?, file_handle.portable_ino()?) != (self.devno, self.inode) {
+        let new_devno = file_handle.portable_dev()?;
+        let new_inode = file_handle.portable_ino()?;
+
+        let inode_change_info = if (new_devno, new_inode) != (self.devno, self.inode) {
+            // Capture metrics from the old file before switching
+            let old_info = FileInodeChangeInfo {
+                old_path: self.path.clone(),
+                bytes_dropped: self.get_bytes_dropped(),
+                reached_eof: self.reached_eof,
+            };
+
             let mut reader = io::BufReader::new(fs::File::open(&path)?);
             let gzipped = is_gzipped(&mut reader)?;
-            let new_reader: Box<dyn BufRead> = if gzipped {
+
+            // Get the new file's metadata for tracking
+            let new_metadata = file_handle.metadata()?;
+            let new_file_size = new_metadata.len();
+
+            let (new_reader, new_position): (Box<dyn BufRead>, FilePosition) = if gzipped {
                 if self.file_position != 0 {
-                    Box::new(null_reader())
+                    // Can't seek in gzipped file, use null reader
+                    (Box::new(null_reader()), self.file_position)
                 } else {
-                    Box::new(io::BufReader::new(MultiGzDecoder::new(reader)))
+                    (Box::new(io::BufReader::new(MultiGzDecoder::new(reader))), 0)
                 }
             } else {
-                reader.seek(io::SeekFrom::Start(self.file_position))?;
-                Box::new(reader)
+                // For the new file, we should start from the beginning since it's a different file
+                // However, we maintain backwards compatibility by seeking to the stored position
+                // if possible (in case the new file is larger than our position)
+                let seek_pos = if self.file_position <= new_file_size {
+                    self.file_position
+                } else {
+                    // New file is smaller than our position, start from end
+                    new_file_size
+                };
+                reader.seek(io::SeekFrom::Start(seek_pos))?;
+                (Box::new(reader), seek_pos)
             };
+
             self.reader = new_reader;
-            self.devno = file_handle.portable_dev()?;
-            self.inode = file_handle.portable_ino()?;
-        }
+            self.devno = new_devno;
+            self.inode = new_inode;
+
+            // Reset tracking for the new file
+            self.initial_file_size = new_file_size;
+            self.initial_file_position = new_position;
+            self.file_position = new_position;
+            self.reached_eof = false;
+
+            Some(old_info)
+        } else {
+            None
+        };
+
         self.path = path;
-        Ok(())
+        Ok(inode_change_info)
     }
 
     pub fn set_file_findable(&mut self, f: bool) {
@@ -208,6 +276,14 @@ impl FileWatcher {
 
     pub fn get_file_position(&self) -> FilePosition {
         self.file_position
+    }
+
+    /// Returns the number of bytes that were not read (dropped) based on the initial file size.
+    /// When the file reaches EOF, this will be 0. When the file is unwatched before EOF,
+    /// this represents the bytes that were never read.
+    /// Note: For actively written files, actual dropped bytes may be higher than this value.
+    pub fn get_bytes_dropped(&self) -> u64 {
+        self.initial_file_size.saturating_sub(self.file_position)
     }
 
     /// Read a single line from the underlying file
