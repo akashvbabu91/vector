@@ -36,6 +36,22 @@ pub struct RawLineResult {
     pub discarded_for_size_and_truncated: Vec<BytesMut>,
 }
 
+/// Information about a file when it is unwatched.
+/// Used for metric emission when Vector stops watching a file for any reason:
+/// - File deleted
+/// - File rotated and old file removed
+/// - Inode changed (file replaced)
+/// - `rotate_wait` timeout
+#[derive(Debug, Clone)]
+pub struct FileUnwatchInfo {
+    /// The path of the file
+    pub path: PathBuf,
+    /// Number of bytes that were not read (dropped) from the file
+    pub bytes_dropped: u64,
+    /// Whether the file reached EOF before being unwatched
+    pub reached_eof: bool,
+}
+
 /// The `FileWatcher` struct defines the polling based state machine which reads
 /// from a file path, transparently updating the underlying file descriptor when
 /// the file has been rolled over, as is common for logs.
@@ -58,6 +74,9 @@ pub struct FileWatcher {
     max_line_bytes: usize,
     line_delimiter: Bytes,
     buf: BytesMut,
+    /// The file size when the watcher was created. Used to calculate
+    /// bytes dropped when the file is unwatched.
+    initial_file_size: u64,
 }
 
 impl FileWatcher {
@@ -146,6 +165,8 @@ impl FileWatcher {
             .and_then(|diff| Instant::now().checked_sub(diff))
             .unwrap_or_else(Instant::now);
 
+        let initial_file_size = metadata.len();
+
         Ok(FileWatcher {
             path,
             findable: true,
@@ -161,12 +182,21 @@ impl FileWatcher {
             max_line_bytes,
             line_delimiter,
             buf: BytesMut::new(),
+            initial_file_size
         })
     }
 
-    pub fn update_path(&mut self, path: PathBuf) -> io::Result<()> {
+    /// Update the path being watched.
+    ///
+    /// If the file at the new path has a different inode, this indicates the file
+    /// was replaced (not just renamed). In this case, returns `FileUnwatchInfo`
+    /// containing metrics about the old file so the caller can emit appropriate events.
+    pub fn update_path(&mut self, path: PathBuf) -> io::Result<Option<FileUnwatchInfo>> {
         let file_handle = File::open(&path)?;
-        if (file_handle.portable_dev()?, file_handle.portable_ino()?) != (self.devno, self.inode) {
+        let unwatch_info = if (file_handle.portable_dev()?, file_handle.portable_ino()?) != (self.devno, self.inode) {
+            // Capture metrics from the old file before switching
+            let old_info = self.get_unwatch_info();
+
             let mut reader = io::BufReader::new(fs::File::open(&path)?);
             let gzipped = is_gzipped(&mut reader)?;
             let new_reader: Box<dyn BufRead> = if gzipped {
@@ -182,9 +212,13 @@ impl FileWatcher {
             self.reader = new_reader;
             self.devno = file_handle.portable_dev()?;
             self.inode = file_handle.portable_ino()?;
-        }
+
+            Some(old_info)
+        } else {
+            None
+        };
         self.path = path;
-        Ok(())
+        Ok(unwatch_info)
     }
 
     pub fn set_file_findable(&mut self, f: bool) {
@@ -208,6 +242,24 @@ impl FileWatcher {
 
     pub fn get_file_position(&self) -> FilePosition {
         self.file_position
+    }
+
+    /// Returns the number of bytes that were not read (dropped) based on the initial file size.
+    /// When the file reaches EOF, this will be 0. When the file is unwatched before EOF,
+    /// this represents the bytes that were never read.
+    /// Note: For actively written files, actual dropped bytes may be higher than this value.
+    pub fn get_bytes_dropped(&self) -> u64 {
+        self.initial_file_size.saturating_sub(self.file_position)
+    }
+
+    /// Returns information about this file for metric emission when unwatching.
+    /// This provides a consistent interface for all unwatch scenarios.
+    pub fn get_unwatch_info(&self) -> FileUnwatchInfo {
+        FileUnwatchInfo {
+            path: self.path.clone(),
+            bytes_dropped: self.get_bytes_dropped(),
+            reached_eof: self.reached_eof,
+        }
     }
 
     /// Read a single line from the underlying file
@@ -310,10 +362,6 @@ impl FileWatcher {
         self.last_seen
     }
 
-    #[inline]
-    pub fn reached_eof(&self) -> bool {
-        self.reached_eof
-    }
 }
 
 fn is_gzipped(r: &mut io::BufReader<fs::File>) -> io::Result<bool> {

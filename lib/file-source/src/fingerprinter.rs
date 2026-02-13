@@ -789,7 +789,7 @@ mod test {
             panic!();
         }
 
-        fn emit_file_unwatched(&self, _: &Path, _: bool) {}
+        fn emit_file_unwatched(&self, _: &Path, _: bool, _: u64) {}
 
         fn emit_file_deleted(&self, _: &Path) {}
 
