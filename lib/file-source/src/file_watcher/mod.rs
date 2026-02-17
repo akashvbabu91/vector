@@ -1,7 +1,8 @@
 use std::{
     fs::{self, File},
-    io::{self, BufRead, Seek},
+    io::{self, BufRead, Read, Seek},
     path::PathBuf,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -18,6 +19,23 @@ use crate::{
 };
 #[cfg(test)]
 mod tests;
+
+/// Wrapper to allow shared access to a File via Arc.
+/// This enables sharing a single file descriptor between the BufReader (for reading)
+/// and a separate handle (for metadata access), without duplicating the fd via dup().
+struct SharedFile(Arc<File>);
+
+impl Read for SharedFile {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        (&*self.0).read(buf)
+    }
+}
+
+impl Seek for SharedFile {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        (&*self.0).seek(pos)
+    }
+}
 
 /// The `RawLine` struct is a thin wrapper around the bytes that have been read
 /// in order to retain the context of where in the file they have been read from.
@@ -63,6 +81,10 @@ pub struct FileWatcher {
     pub path: PathBuf,
     findable: bool,
     reader: Box<dyn BufRead>,
+    /// Shared file handle for metadata access (e.g., current file size).
+    /// Uses Arc to share the fd with the reader without duplicating it.
+    /// None for gzipped files where we can't track accurate position.
+    file_handle: Option<Arc<File>>,
     file_position: FilePosition,
     devno: u64,
     inode: u64,
@@ -74,8 +96,8 @@ pub struct FileWatcher {
     max_line_bytes: usize,
     line_delimiter: Bytes,
     buf: BytesMut,
-    /// The file size when the watcher was created. Used to calculate
-    /// bytes dropped when the file is unwatched.
+    /// The file size when the watcher was created. Used as fallback for
+    /// bytes dropped calculation when file_handle is unavailable.
     initial_file_size: u64,
 }
 
@@ -92,10 +114,12 @@ impl FileWatcher {
         max_line_bytes: usize,
         line_delimiter: Bytes,
     ) -> Result<FileWatcher, io::Error> {
-        let f = fs::File::open(&path)?;
+        let f = Arc::new(fs::File::open(&path)?);
         let (devno, ino) = (f.portable_dev()?, f.portable_ino()?);
         let metadata = f.metadata()?;
-        let mut reader = io::BufReader::new(f);
+
+        let shared_file = SharedFile(Arc::clone(&f));
+        let mut reader = io::BufReader::new(shared_file);
 
         let too_old = if let (Some(ignore_before), Ok(modified_time)) = (
             ignore_before,
@@ -108,15 +132,17 @@ impl FileWatcher {
 
         let gzipped = is_gzipped(&mut reader)?;
 
-        // Determine the actual position at which we should start reading
-        let (reader, file_position): (Box<dyn BufRead>, FilePosition) =
+        // Determine the actual position at which we should start reading.
+        // For non-gzipped files, we keep the Arc<File> handle for metadata access.
+        // For gzipped files, we don't track the handle since position tracking is not meaningful.
+        let (reader, file_position, file_handle): (Box<dyn BufRead>, FilePosition, Option<Arc<File>>) =
             match (gzipped, too_old, read_from) {
                 (true, true, _) => {
                     debug!(
                         message = "Not reading gzipped file older than `ignore_older`.",
                         ?path,
                     );
-                    (Box::new(null_reader()), 0)
+                    (Box::new(null_reader()), 0, None)
                 }
                 (true, _, ReadFrom::Checkpoint(file_position)) => {
                     debug!(
@@ -124,7 +150,7 @@ impl FileWatcher {
                         ?path,
                         %file_position
                     );
-                    (Box::new(null_reader()), file_position)
+                    (Box::new(null_reader()), file_position, None)
                 }
                 // TODO: This may become the default, leading us to stop reading gzipped files that
                 // we were reading before. Should we merge this and the next branch to read
@@ -135,26 +161,26 @@ impl FileWatcher {
                         message = "Can't read from the end of already-compressed file.",
                         ?path,
                     );
-                    (Box::new(null_reader()), 0)
+                    (Box::new(null_reader()), 0, None)
                 }
                 (true, false, ReadFrom::Beginning) => {
-                    (Box::new(io::BufReader::new(MultiGzDecoder::new(reader))), 0)
+                    (Box::new(io::BufReader::new(MultiGzDecoder::new(reader))), 0, None)
                 }
                 (false, true, _) => {
                     let pos = reader.seek(io::SeekFrom::End(0)).unwrap();
-                    (Box::new(reader), pos)
+                    (Box::new(reader), pos, Some(f))
                 }
                 (false, false, ReadFrom::Checkpoint(file_position)) => {
                     let pos = reader.seek(io::SeekFrom::Start(file_position)).unwrap();
-                    (Box::new(reader), pos)
+                    (Box::new(reader), pos, Some(f))
                 }
                 (false, false, ReadFrom::Beginning) => {
                     let pos = reader.seek(io::SeekFrom::Start(0)).unwrap();
-                    (Box::new(reader), pos)
+                    (Box::new(reader), pos, Some(f))
                 }
                 (false, false, ReadFrom::End) => {
                     let pos = reader.seek(io::SeekFrom::End(0)).unwrap();
-                    (Box::new(reader), pos)
+                    (Box::new(reader), pos, Some(f))
                 }
             };
 
@@ -171,6 +197,7 @@ impl FileWatcher {
             path,
             findable: true,
             reader,
+            file_handle,
             file_position,
             devno,
             inode: ino,
@@ -182,7 +209,7 @@ impl FileWatcher {
             max_line_bytes,
             line_delimiter,
             buf: BytesMut::new(),
-            initial_file_size
+            initial_file_size,
         })
     }
 
@@ -192,26 +219,34 @@ impl FileWatcher {
     /// was replaced (not just renamed). In this case, returns `FileUnwatchInfo`
     /// containing metrics about the old file so the caller can emit appropriate events.
     pub fn update_path(&mut self, path: PathBuf) -> io::Result<Option<FileUnwatchInfo>> {
-        let file_handle = File::open(&path)?;
-        let unwatch_info = if (file_handle.portable_dev()?, file_handle.portable_ino()?) != (self.devno, self.inode) {
+        let new_file = Arc::new(File::open(&path)?);
+        let unwatch_info = if (new_file.portable_dev()?, new_file.portable_ino()?) != (self.devno, self.inode) {
             // Capture metrics from the old file before switching
             let old_info = self.get_unwatch_info();
 
-            let mut reader = io::BufReader::new(fs::File::open(&path)?);
+            let shared_file = SharedFile(Arc::clone(&new_file));
+            let mut reader = io::BufReader::new(shared_file);
             let gzipped = is_gzipped(&mut reader)?;
-            let new_reader: Box<dyn BufRead> = if gzipped {
+            let (new_reader, new_file_handle): (Box<dyn BufRead>, Option<Arc<File>>) = if gzipped {
                 if self.file_position != 0 {
-                    Box::new(null_reader())
+                    (Box::new(null_reader()), None)
                 } else {
-                    Box::new(io::BufReader::new(MultiGzDecoder::new(reader)))
+                    (Box::new(io::BufReader::new(MultiGzDecoder::new(reader))), None)
                 }
             } else {
                 reader.seek(io::SeekFrom::Start(self.file_position))?;
-                Box::new(reader)
+                (Box::new(reader), Some(new_file))
             };
             self.reader = new_reader;
-            self.devno = file_handle.portable_dev()?;
-            self.inode = file_handle.portable_ino()?;
+            self.file_handle = new_file_handle;
+            self.devno = self.file_handle.as_ref().map(|f| f.portable_dev()).transpose()?.unwrap_or(0);
+            self.inode = self.file_handle.as_ref().map(|f| f.portable_ino()).transpose()?.unwrap_or(0);
+            // Reset initial_file_size for the new file
+            self.initial_file_size = self.file_handle
+                .as_ref()
+                .and_then(|f| f.metadata().ok())
+                .map(|m| m.len())
+                .unwrap_or(0);
 
             Some(old_info)
         } else {
@@ -244,12 +279,20 @@ impl FileWatcher {
         self.file_position
     }
 
-    /// Returns the number of bytes that were not read (dropped) based on the initial file size.
+    /// Returns the number of bytes that were not read (dropped).
+    /// Uses the current file size from the file handle if available (works even after
+    /// file deletion since the fd remains valid), falling back to initial_file_size.
     /// When the file reaches EOF, this will be 0. When the file is unwatched before EOF,
     /// this represents the bytes that were never read.
-    /// Note: For actively written files, actual dropped bytes may be higher than this value.
     pub fn get_bytes_dropped(&self) -> u64 {
-        self.initial_file_size.saturating_sub(self.file_position)
+        let current_size = self
+            .file_handle
+            .as_ref()
+            .and_then(|f| f.metadata().ok())
+            .map(|m| m.len())
+            .unwrap_or(self.initial_file_size);
+
+        current_size.saturating_sub(self.file_position)
     }
 
     /// Returns information about this file for metric emission when unwatching.
@@ -364,7 +407,7 @@ impl FileWatcher {
 
 }
 
-fn is_gzipped(r: &mut io::BufReader<fs::File>) -> io::Result<bool> {
+fn is_gzipped<R: Read>(r: &mut io::BufReader<R>) -> io::Result<bool> {
     let header_bytes = r.fill_buf()?;
     // WARN: The paired `BufReader::consume` is not called intentionally. If we
     // do we'll chop a decent part of the potential gzip stream off.
