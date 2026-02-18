@@ -578,6 +578,22 @@ impl StreamSink<Event> for PrometheusExporter {
                     match metrics.entry(MetricRef::from_metric(&normalized)) {
                         Entry::Occupied(mut entry) => {
                             let (data, metadata) = entry.get_mut();
+
+                            // Detect race condition: log if we're about to write a smaller value
+                            if let (MetricValue::Counter { value: existing }, MetricValue::Counter { value: new }) =
+                                (data.value(), normalized.value())
+                            {
+                                if new < existing {
+                                    error!(
+                                        message = "Race condition detected: counter value decreased",
+                                        metric_name = %data.name(),
+                                        existing_value = %existing,
+                                        new_value = %new,
+                                        decrease = %(existing - new),
+                                    );
+                                }
+                            }
+
                             *data = normalized;
                             metadata.refresh();
                         }
