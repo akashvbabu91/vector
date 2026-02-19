@@ -566,7 +566,22 @@ impl StreamSink<Event> for PrometheusExporter {
 
                             match normalized.kind() {
                                 MetricKind::Absolute => {
-                                    // For absolute metrics, just replace the value
+                                    // Detect if absolute metric value decreased (should not happen for counters)
+                                    if let (
+                                        MetricValue::Counter { value: existing },
+                                        MetricValue::Counter { value: new },
+                                    ) = (data.value(), normalized.value())
+                                    {
+                                        if new < existing {
+                                            error!(
+                                                message = "Counter value decreased unexpectedly",
+                                                metric_name = %data.name(),
+                                                existing_value = %existing,
+                                                new_value = %new,
+                                                decrease = %(existing - new),
+                                            );
+                                        }
+                                    }
                                     *data = normalized;
                                 }
                                 MetricKind::Incremental => {
