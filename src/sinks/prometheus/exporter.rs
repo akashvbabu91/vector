@@ -572,11 +572,31 @@ impl StreamSink<Event> for PrometheusExporter {
                                 MetricKind::Incremental => {
                                     // For incremental metrics, accumulate atomically under the write lock
                                     let mut current = data.value().clone();
+
+                                    // Debug logging: check for negative increments
+                                    if let MetricValue::Counter { value: inc_value } =
+                                        normalized.value()
+                                    {
+                                        if *inc_value < 0.0 {
+                                            warn!(
+                                                message = "Received negative counter increment.",
+                                                metric_name = %normalized.name(),
+                                                increment = %inc_value,
+                                            );
+                                        }
+                                    }
+
                                     if current.add(normalized.value()) {
                                         // Successfully accumulated - update in place
                                         *data = normalized.with_value(current).into_absolute();
                                     } else {
-                                        // Incompatible values - replace with new value as absolute
+                                        // Incompatible metric value types - this would cause counter reset
+                                        warn!(
+                                            message = "Metric value type mismatch during accumulation, resetting counter.",
+                                            metric_name = %normalized.name(),
+                                            stored_type = ?std::mem::discriminant(data.value()),
+                                            incoming_type = ?std::mem::discriminant(normalized.value()),
+                                        );
                                         *data = normalized.into_absolute();
                                     }
                                 }
