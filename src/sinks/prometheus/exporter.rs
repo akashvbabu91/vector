@@ -576,17 +576,33 @@ impl StreamSink<Event> for PrometheusExporter {
                                     // Debug logging: check for negative increments
                                     if let MetricValue::Counter { value: inc_value } =
                                         normalized.value()
+                                        && *inc_value < 0.0
                                     {
-                                        if *inc_value < 0.0 {
-                                            warn!(
-                                                message = "Received negative counter increment.",
-                                                metric_name = %normalized.name(),
-                                                increment = %inc_value,
-                                            );
-                                        }
+                                        warn!(
+                                            message = "Received negative counter increment.",
+                                            metric_name = %normalized.name(),
+                                            increment = %inc_value,
+                                        );
                                     }
 
                                     if current.add(normalized.value()) {
+                                        // Safety check: detect if counter would decrease (should never happen with fix)
+                                        if let (
+                                            MetricValue::Counter { value: old_val },
+                                            MetricValue::Counter { value: new_val },
+                                        ) = (data.value(), &current)
+                                            && *new_val < *old_val
+                                        {
+                                            error!(
+                                                message = "Counter decrease detected - this indicates a bug.",
+                                                metric_name = %normalized.name(),
+                                                old_value = %old_val,
+                                                new_value = %new_val,
+                                                difference = %(old_val - new_val),
+                                                internal_log_rate_limit = true,
+                                            );
+                                        }
+
                                         // Successfully accumulated - update in place
                                         *data = normalized.with_value(current).into_absolute();
                                     } else {
