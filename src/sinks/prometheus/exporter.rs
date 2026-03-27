@@ -509,8 +509,27 @@ impl PrometheusExporter {
             }
             _ => metric,
         };
-        
-        Some(new_metric)
+
+        match new_metric.kind() {
+            MetricKind::Absolute => Some(new_metric),
+            MetricKind::Incremental => {
+                let metrics = self.metrics.read().expect(LOCK_FAILED);
+                let metric_ref = MetricRef::from_metric(&new_metric);
+
+                if let Some(existing) = metrics.get(&metric_ref) {
+                    let mut current = existing.0.value().clone();
+                    if current.add(new_metric.value()) {
+                        // If we were able to add to the existing value (i.e. they were compatible),
+                        // return the result as an absolute metric.
+                        return Some(new_metric.with_value(current).into_absolute());
+                    }
+                }
+
+                // Otherwise, if we didn't have an existing value or we did and it was not
+                // compatible with the new value, simply return the new value as absolute.
+                Some(new_metric.into_absolute())
+            }
+        }
     }
 }
 
@@ -555,77 +574,36 @@ impl StreamSink<Event> for PrometheusExporter {
 
                     // We have a normalized metric, in absolute form.  If we're already aware of this
                     // metric, update its expiration deadline, otherwise, start tracking it.
-                    //
-                    // For incremental metrics, we accumulate the value atomically under the
-                    // write lock to avoid race conditions where concurrent updates could
-                    // cause lost increments or counter value decreases.
                     let mut metrics = self.metrics.write().expect(LOCK_FAILED);
 
                     match metrics.entry(MetricRef::from_metric(&normalized)) {
                         Entry::Occupied(mut entry) => {
                             let (data, metadata) = entry.get_mut();
 
-                            match normalized.kind() {
-                                MetricKind::Absolute => {
-                                    *data = normalized;
-                                }
-                                MetricKind::Incremental => {
-                                    // For incremental metrics, accumulate atomically under the write lock
-                                    let mut current = data.value().clone();
-
-                                    // Debug logging: check for negative increments
-                                    if let MetricValue::Counter { value: inc_value } =
-                                        normalized.value()
-                                        && *inc_value < 0.0
-                                    {
-                                        warn!(
-                                            message = "Received negative counter increment.",
-                                            metric_name = %normalized.name(),
-                                            increment = %inc_value,
-                                        );
-                                    }
-
-                                    if current.add(normalized.value()) {
-                                        // Safety check: detect if counter would decrease (should never happen with fix)
-                                        if let (
-                                            MetricValue::Counter { value: old_val },
-                                            MetricValue::Counter { value: new_val },
-                                        ) = (data.value(), &current)
-                                            && *new_val < *old_val
-                                        {
-                                            error!(
-                                                message = "Counter decrease detected - this indicates a bug.",
-                                                metric_name = %normalized.name(),
-                                                old_value = %old_val,
-                                                new_value = %new_val,
-                                                difference = %(old_val - new_val),
-                                                internal_log_rate_limit = true,
-                                            );
-                                        }
-
-                                        // Successfully accumulated - update in place
-                                        *data = normalized.with_value(current).into_absolute();
-                                    } else {
-                                        // Incompatible metric value types - this would cause counter reset
-                                        warn!(
-                                            message = "Metric value type mismatch during accumulation, resetting counter.",
-                                            metric_name = %normalized.name(),
-                                            stored_type = ?std::mem::discriminant(data.value()),
-                                            incoming_type = ?std::mem::discriminant(normalized.value()),
-                                        );
-                                        *data = normalized.into_absolute();
-                                    }
+                            // Detect out-of-order timestamps: incoming event has older timestamp
+                            // than the currently stored metric. This can cause Prometheus to show
+                            // apparent counter decreases when it indexes samples by timestamp.
+                            // Fix: set suppress_timestamp: true in the sink config.
+                            if let (Some(stored_ts), Some(incoming_ts)) =
+                                (data.timestamp(), normalized.timestamp())
+                            {
+                                if incoming_ts < stored_ts {
+                                    warn!(
+                                        message = "Out-of-order timestamp detected: incoming event has older timestamp than stored metric. This can cause Prometheus to show incorrect counter values. Consider setting suppress_timestamp: true.",
+                                        metric_name = %normalized.name(),
+                                        stored_timestamp = %stored_ts,
+                                        incoming_timestamp = %incoming_ts,
+                                        time_difference_ms = %(stored_ts.timestamp_millis() - incoming_ts.timestamp_millis()),
+                                        internal_log_rate_limit = true,
+                                    );
                                 }
                             }
+
+                            *data = normalized;
                             metadata.refresh();
                         }
                         Entry::Vacant(entry) => {
-                            // For new metrics, convert incremental to absolute before storing
-                            let to_store = match normalized.kind() {
-                                MetricKind::Absolute => normalized,
-                                MetricKind::Incremental => normalized.into_absolute(),
-                            };
-                            entry.insert((to_store, MetricMetadata::new(flush_period)));
+                            entry.insert((normalized, MetricMetadata::new(flush_period)));
                         }
                     }
                     finalizers.update_status(EventStatus::Delivered);
