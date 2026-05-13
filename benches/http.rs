@@ -1,31 +1,30 @@
 use std::net::SocketAddr;
 
-use criterion::{criterion_group, BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput};
+use criterion::{BatchSize, BenchmarkId, Criterion, SamplingMode, Throughput, criterion_group};
 use futures::TryFutureExt;
 use hyper::{
-    service::{make_service_fn, service_fn},
     Body, Response, Server,
+    service::{make_service_fn, service_fn},
 };
 use tokio::runtime::Runtime;
 use vector::{
-    config,
+    Error, config,
     sinks::{
         self,
         util::{BatchConfig, Compression},
     },
     sources,
     template::Template,
-    test_util::{next_addr, random_lines, runtime, send_lines, start_topology, wait_for_tcp},
-    Error,
+    test_util::{addr::next_addr, random_lines, runtime, send_lines, start_topology, wait_for_tcp},
 };
-use vector_lib::codecs::{encoding::FramingConfig, TextSerializerConfig};
+use vector_lib::codecs::{TextSerializerConfig, encoding::FramingConfig};
 
 fn benchmark_http(c: &mut Criterion) {
     let num_lines: usize = 1_000;
     let line_size: usize = 100;
 
-    let in_addr = next_addr();
-    let out_addr = next_addr();
+    let (_guard_0, in_addr) = next_addr();
+    let (_guard_1, out_addr) = next_addr();
 
     let _srv = serve(out_addr);
 
@@ -56,7 +55,6 @@ fn benchmark_http(c: &mut Criterion) {
                                 compression: *compression,
                                 method: Default::default(),
                                 auth: Default::default(),
-                                headers: Default::default(),
                                 payload_prefix: Default::default(),
                                 payload_suffix: Default::default(),
                                 batch,
@@ -65,6 +63,7 @@ fn benchmark_http(c: &mut Criterion) {
                                 request: Default::default(),
                                 tls: Default::default(),
                                 acknowledgements: Default::default(),
+                                retry_strategy: Default::default(),
                             },
                         );
 

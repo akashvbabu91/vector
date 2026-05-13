@@ -1,7 +1,8 @@
 use std::fmt;
 
-use crate::sinks::{prelude::*, util::partitioner::KeyPartitioner};
 use vector_lib::{event::Event, partition::Partitioner};
+
+use crate::sinks::{prelude::*, util::partitioner::KeyPartitioner};
 
 pub struct AzureBlobSink<Svc, RB, P = KeyPartitioner> {
     service: Svc,
@@ -46,7 +47,9 @@ where
         let request_builder = self.request_builder;
 
         input
-            .batched_partitioned(partitioner, || settings.as_byte_size_config())
+            .batched_partitioned(partitioner, settings.timeout, |_| {
+                settings.as_byte_size_config()
+            })
             .filter_map(|(key, batch)| async move {
                 // We don't need to emit an error here if the event is dropped since this will occur if the template
                 // couldn't be rendered during the partitioning. A `TemplateRenderingError` is already emitted when

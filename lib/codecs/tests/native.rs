@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use std::{
     fs::{self, File},
     io::{Read, Write},
@@ -6,8 +8,8 @@ use std::{
 
 use bytes::{Bytes, BytesMut};
 use codecs::{
-    decoding::format::Deserializer, encoding::format::Serializer, NativeDeserializerConfig,
-    NativeJsonDeserializerConfig, NativeJsonSerializerConfig, NativeSerializerConfig,
+    NativeDeserializerConfig, NativeJsonDeserializerConfig, NativeJsonSerializerConfig,
+    NativeSerializerConfig, decoding::format::Deserializer, encoding::format::Serializer,
 };
 use similar_asserts::assert_eq;
 use vector_core::{config::LogNamespace, event::Event};

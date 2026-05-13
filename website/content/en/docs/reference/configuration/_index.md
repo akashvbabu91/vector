@@ -3,7 +3,7 @@ title: Configuring Vector
 short: Configuration
 weight: 2
 aliases: ["/docs/configuration", "/docs/setup/configuration"]
-tags: ["configuration", "env", "environment variables", "interpolation"]
+tags: ["configuration", "env", "environment variables", "interpolation", "enrichment", "table", "memory"]
 ---
 
 Vector is configured using a configuration file. This section contains a
@@ -250,8 +250,9 @@ Refer to the [Environment Variables](docs/reference/environment_variables/) page
 ### Formats
 
 Vector supports [YAML], [TOML], and [JSON] to ensure that Vector fits into your
-workflow. A side benefit of supporting YAML and JSON is that they enable you to use
-data templating languages such as [ytt], [Jsonnet] and [Cue].
+workflow. We recommend using YAML as the default configuration format. A side
+benefit of supporting YAML and JSON is that they enable you to use data templating
+languages such as [ytt], [Jsonnet] and [Cue].
 
 #### Location
 

@@ -12,7 +12,7 @@ generated: components: sinks: aws_s3: configuration: {
 		required: false
 		type: object: options: enabled: {
 			description: """
-				Whether or not end-to-end acknowledgements are enabled.
+				Controls whether or not end-to-end acknowledgements are enabled.
 
 				When enabled for a sink, any source that supports end-to-end
 				acknowledgements that is connected to that sink waits for events
@@ -256,6 +256,79 @@ generated: components: sinks: aws_s3: configuration: {
 			}
 		}
 	}
+	batch_encoding: {
+		description: """
+			Batch encoding configuration for columnar formats.
+
+			When set, events are encoded together as a batch in a columnar format (Parquet)
+			instead of the standard per-event framing-based encoding. The columnar format handles
+			its own internal compression, so the top-level `compression` setting is bypassed.
+			"""
+		required: false
+		type: object: options: {
+			codec: {
+				description: """
+					Encodes events in [Apache Parquet][apache_parquet] columnar format.
+
+					[apache_parquet]: https://parquet.apache.org/
+					"""
+				required: true
+				type: string: enum: parquet: """
+					Encodes events in [Apache Parquet][apache_parquet] columnar format.
+
+					[apache_parquet]: https://parquet.apache.org/
+					"""
+			}
+			compression: {
+				description: "Compression codec applied per column page inside the Parquet file."
+				required:    false
+				type: object: options: {
+					algorithm: {
+						description: "Compression codec applied per column page inside the Parquet file."
+						required:    false
+						type: string: {
+							default: "snappy"
+							enum: {
+								gzip:   "Gzip compression. Level must be between 1 and 9."
+								lz4:    "LZ4 raw compression"
+								none:   "No compression"
+								snappy: "Snappy compression (no level)."
+								zstd:   "Zstd compression. Level must be between 1 and 21."
+							}
+						}
+					}
+					level: {
+						description:   "Compression level (1–21). This is the range Vector supports; higher values compress more but are slower."
+						relevant_when: "algorithm = \"zstd\" or algorithm = \"gzip\""
+						required:      true
+						type: uint: {}
+					}
+				}
+			}
+			schema_file: {
+				description: """
+					Path to a native Parquet schema file (`.schema`).
+
+					Required unless `schema_mode` is `auto_infer`. The file must contain a valid
+					Parquet message type definition.
+					"""
+				required: false
+				type: string: {}
+			}
+			schema_mode: {
+				description: "Controls how events with fields not present in the schema are handled."
+				required:    false
+				type: string: {
+					default: "relaxed"
+					enum: {
+						auto_infer: "Auto infer schema based on the batch. No schema file needed."
+						relaxed:    "Missing fields become null. Extra fields are silently dropped."
+						strict:     "Missing fields become null. Extra fields cause an error."
+					}
+				}
+			}
+		}
+	}
 	bucket: {
 		description: """
 			The S3 bucket name.
@@ -378,7 +451,7 @@ generated: components: sinks: aws_s3: configuration: {
 					}
 					device_version: {
 						description: """
-																Identifies the version of the problem. The combination of the device product, vendor and this value make up the unique id of the device that sends messages.
+																Identifies the version of the problem. The combination of the device product, vendor, and this value make up the unique id of the device that sends messages.
 																The value length must be less than or equal to 31.
 																"""
 						required: true
@@ -408,7 +481,6 @@ generated: components: sinks: aws_s3: configuration: {
 					severity: {
 						description: """
 																This is a path that points to the field of a log event that reflects importance of the event.
-																Reflects importance of the event.
 
 																It must point to a number from 0 to 10.
 																0 = lowest_importance, 10 = highest_importance.
@@ -489,6 +561,15 @@ generated: components: sinks: aws_s3: configuration: {
 						[vector_native_json]: https://github.com/vectordotdev/vector/blob/master/lib/codecs/tests/data/native_encoding/schema.cue
 						[experimental]: https://vector.dev/highlights/2022-03-31-native-event-codecs
 						"""
+					otlp: """
+						Encodes an event in the [OTLP (OpenTelemetry Protocol)][otlp] format.
+
+						This codec uses protobuf encoding, which is the recommended format for OTLP.
+						The output is suitable for sending to OTLP-compatible endpoints with
+						`content-type: application/x-protobuf`.
+
+						[otlp]: https://opentelemetry.io/docs/specs/otlp/
+						"""
 					protobuf: """
 						Encodes an event as a [Protobuf][protobuf] message.
 
@@ -502,6 +583,10 @@ generated: components: sinks: aws_s3: configuration: {
 						Be careful if you are modifying your log events (for example, by using a `remap`
 						transform) and removing the message field while doing additional parsing on it, as this
 						could lead to the encoding emitting empty strings for the given event.
+						"""
+					syslog: """
+						Syslog encoding
+						RFC 3164 and 5424 are supported
 						"""
 					text: """
 						Plain text encoding.
@@ -523,7 +608,7 @@ generated: components: sinks: aws_s3: configuration: {
 					capacity: {
 						description: """
 																Sets the capacity (in bytes) of the internal buffer used in the CSV writer.
-																This defaults to 8KB.
+																This defaults to 8192 bytes (8KB).
 																"""
 						required: false
 						type: uint: default: 8192
@@ -602,6 +687,20 @@ generated: components: sinks: aws_s3: configuration: {
 				required:    false
 				type: array: items: type: string: {}
 			}
+			gelf: {
+				description:   "The GELF Serializer Options."
+				relevant_when: "codec = \"gelf\""
+				required:      false
+				type: object: options: max_chunk_size: {
+					description: """
+						Maximum size for each GELF chunked datagram (including 12-byte header).
+						Chunking starts when datagrams exceed this size.
+						For Graylog target, keep at or below 8192 bytes; for Vector target (`gelf` decoding with `chunked_gelf` framing), up to 65,500 bytes is recommended.
+						"""
+					required: false
+					type: uint: default: 8192
+				}
+			}
 			json: {
 				description:   "Options for the JsonSerializer."
 				relevant_when: "codec = \"json\""
@@ -617,7 +716,7 @@ generated: components: sinks: aws_s3: configuration: {
 					Controls how metric tag values are encoded.
 
 					When set to `single`, only the last non-bare value of tags are displayed with the
-					metric.  When set to `full`, all metric tags are exposed as separate assignments.
+					metric. When set to `full`, all metric tags are exposed as separate assignments.
 					"""
 				relevant_when: "codec = \"json\" or codec = \"text\""
 				required:      false
@@ -659,6 +758,67 @@ generated: components: sinks: aws_s3: configuration: {
 						required:    true
 						type: string: examples: ["package.Message"]
 					}
+					use_json_names: {
+						description: """
+																Use JSON field names (camelCase) instead of protobuf field names (snake_case).
+
+																When enabled, the serializer looks for fields using their JSON names as defined
+																in the `.proto` file (for example `jobDescription` instead of `job_description`).
+
+																This is useful when working with data that has already been converted from JSON or
+																when interfacing with systems that use JSON naming conventions.
+																"""
+						required: false
+						type: bool: default: false
+					}
+				}
+			}
+			syslog: {
+				description:   "Options for the Syslog serializer."
+				relevant_when: "codec = \"syslog\""
+				required:      false
+				type: object: options: {
+					app_name: {
+						description: """
+																Path to a field in the event to use for the app name.
+
+																If not provided, the encoder checks for a semantic "service" field.
+																If that is also missing, it defaults to "vector".
+																"""
+						required: false
+						type: string: {}
+					}
+					facility: {
+						description: "Path to a field in the event to use for the facility. Defaults to \"user\"."
+						required:    false
+						type: string: {}
+					}
+					msg_id: {
+						description: "Path to a field in the event to use for the msg ID."
+						required:    false
+						type: string: {}
+					}
+					proc_id: {
+						description: "Path to a field in the event to use for the proc ID."
+						required:    false
+						type: string: {}
+					}
+					rfc: {
+						description: "RFC to use for formatting."
+						required:    false
+						type: string: {
+							default: "rfc5424"
+							enum: {
+								rfc3164: "The legacy RFC3164 syslog format."
+								rfc5424: "The modern RFC5424 syslog format."
+							}
+						}
+					}
+					severity: {
+						description: "Path to a field in the event to use for the severity. Defaults to \"informational\"."
+						required:    false
+						type: string: {}
+					}
 				}
 			}
 			timestamp_format: {
@@ -670,7 +830,7 @@ generated: components: sinks: aws_s3: configuration: {
 					unix_float: "Represent the timestamp as a Unix timestamp in floating point."
 					unix_ms:    "Represent the timestamp as a Unix timestamp in milliseconds."
 					unix_ns:    "Represent the timestamp as a Unix timestamp in nanoseconds."
-					unix_us:    "Represent the timestamp as a Unix timestamp in microseconds"
+					unix_us:    "Represent the timestamp as a Unix timestamp in microseconds."
 				}
 			}
 		}
@@ -777,6 +937,12 @@ generated: components: sinks: aws_s3: configuration: {
 					}
 				}
 			}
+			max_frame_length: {
+				description:   "Maximum frame length"
+				relevant_when: "method = \"varint_length_delimited\""
+				required:      false
+				type: uint: default: 8388608
+			}
 			method: {
 				description: "The framing method."
 				required:    true
@@ -789,6 +955,11 @@ generated: components: sinks: aws_s3: configuration: {
 						The prefix is a 32-bit unsigned integer, little endian.
 						"""
 					newline_delimited: "Event data is delimited by a newline (LF) character."
+					varint_length_delimited: """
+						Event data is prefixed with its length in bytes as a varint.
+
+						This is compatible with protobuf's length-delimited encoding.
+						"""
 				}
 			}
 		}
@@ -930,12 +1101,12 @@ generated: components: sinks: aws_s3: configuration: {
 						description: """
 																Scale of RTT deviations which are not considered anomalous.
 
-																Valid values are greater than or equal to `0`, and we expect reasonable values to range from `1.0` to `3.0`.
+																Valid values are greater than or equal to `0`, and reasonable values range from `1.0` to `3.0`.
 
-																When calculating the past RTT average, we also compute a secondary “deviation” value that indicates how variable
-																those values are. We use that deviation when comparing the past RTT average to the current measurements, so we
+																When calculating the past RTT average, a secondary “deviation” value is also computed that indicates how variable
+																those values are. That deviation is used when comparing the past RTT average to the current measurements, so we
 																can ignore increases in RTT that are within an expected range. This factor is used to scale up the deviation to
-																an appropriate range.  Larger values cause the algorithm to ignore larger increases in the RTT.
+																an appropriate range. Larger values cause the algorithm to ignore larger increases in the RTT.
 																"""
 						required: false
 						type: float: default: 2.5
@@ -997,7 +1168,7 @@ generated: components: sinks: aws_s3: configuration: {
 				description: """
 					The amount of time to wait before attempting the first retry for a failed request.
 
-					After the first retry has failed, the fibonacci sequence is used to select future backoffs.
+					After the first retry has failed, the Fibonacci sequence is used to select future backoffs.
 					"""
 				required: false
 				type: uint: {
@@ -1050,7 +1221,7 @@ generated: components: sinks: aws_s3: configuration: {
 	}
 	retry_strategy: {
 		description: """
-			Specifies errors to retry
+			Specifies retry strategy for failed requests.
 
 			By default, the sink only retries attempts it deems possible to retry.
 			These settings extend the default behavior.
@@ -1067,11 +1238,25 @@ generated: components: sinks: aws_s3: configuration: {
 				description: "The retry strategy enum."
 				required:    false
 				type: string: {
-					default: "none"
+					default: "default"
 					enum: {
 						all:    "Retry on *all* errors"
 						custom: "Custom retry strategy"
-						none:   "Don't retry any errors"
+						default: """
+															Default strategy. The following error types will be retried:
+															- `TimeoutError`
+															- `DispatchFailure`
+															- `ResponseError` or `ServiceError` when:
+															  - HTTP status is 5xx
+															  - Status is 429 (Too Many Requests)
+															  - `x-amz-retry-after` header is present
+															  - HTTP status is 4xx and response body contains one of:
+															    - `"RequestTimeout"`
+															    - `"RequestExpired"`
+															    - `"ThrottlingException"`
+															- Fallback: Any unknown error variant
+															"""
+						none: "Don't retry any errors"
 					}
 				}
 			}

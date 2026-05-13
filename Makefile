@@ -17,6 +17,15 @@ else
     export DNSTAP_BENCHES := dnstap-benches
 endif
 
+# When COVERAGE=true, swap cargo-nextest for cargo-llvm-cov so test targets collect
+# coverage data. Run `make coverage-report` afterwards to emit the lcov file.
+export COVERAGE ?= false
+ifeq ($(COVERAGE), true)
+TEST_RUNNER := cargo llvm-cov nextest --no-report
+else
+TEST_RUNNER := cargo nextest run
+endif
+
 # Override this with any scopes for testing/benching.
 export SCOPE ?=
 # Override this with any extra flags for cargo bench
@@ -48,7 +57,7 @@ export CURRENT_DIR = $(shell pwd)
 # Override this to automatically enter a container containing the correct, full, official build environment for Vector, ready for development
 export ENVIRONMENT ?= false
 # The upstream container we publish artifacts to on a successful master build.
-export ENVIRONMENT_UPSTREAM ?= docker.io/timberio/vector-dev:sha-3eadc96742a33754a5859203b58249f6a806972a
+export ENVIRONMENT_UPSTREAM ?= docker.io/timberio/vector-dev:latest
 # Override to disable building the container, having it pull from the GitHub packages repo instead
 # TODO: Disable this by default. Blocked by `docker pull` from GitHub Packages requiring authenticated login
 export ENVIRONMENT_AUTOBUILD ?= true
@@ -62,12 +71,20 @@ export ENVIRONMENT_NETWORK ?= host
 # Multiple port publishing can be provided using spaces, for example: 8686:8686 8080:8080/udp
 export ENVIRONMENT_PUBLISH ?=
 
+# If ENVIRONMENT is true, always use cargo vdev since it may be running inside the container
+ifeq ($(origin VDEV), environment)
+ifeq ($(ENVIRONMENT), true)
+VDEV := cargo vdev
+else
+# VDEV is already set from environment, keep it
+endif
+else
+VDEV := cargo vdev
+endif
+
 # Set dummy AWS credentials if not present - used for AWS and ES integration tests
 export AWS_ACCESS_KEY_ID ?= "dummy"
 export AWS_SECRET_ACCESS_KEY ?= "dummy"
-
-# Set version
-export VERSION ?= $(shell command -v cargo >/dev/null && cargo vdev version || echo unknown)
 
 # Set if you are on the CI and actually want the things to happen. (Non-CI users should never set this.)
 export CI ?= false
@@ -256,14 +273,29 @@ cross-enable: cargo-install-cross
 CARGO_HANDLES_FRESHNESS:
 	${EMPTY}
 
+# Pinned digests for ghcr.io/cross-rs/<target>:edge.
+# Source: cross-rs/cross @ f86fd03bb70b4c6802847c18087e21391498b0b4, built 2026-04-10 (Ubuntu 20.04 focal).
+# Refresh with: crane digest ghcr.io/cross-rs/<target>:edge
+CROSS_DIGEST_x86_64-unknown-linux-gnu       := sha256:13f7a68e55cb05a19e840bce65834fc785dc069e0c2218d12b8fdb8f8a1519d5
+CROSS_DIGEST_aarch64-unknown-linux-gnu      := sha256:3bf094d22fc4f73c9bdce45ddd7a8bbae349efdbd51b4d4b5ee1bedd8454466b
+CROSS_DIGEST_x86_64-unknown-linux-musl      := sha256:c59deede3efcd7cb6f6a57641241ba1c63cfe35b7965be09a851242b4209639d
+CROSS_DIGEST_aarch64-unknown-linux-musl     := sha256:dad492e0f040c6e712d4be9b970c9de5f3b8ef9cde6b9a2b437d56d1dabeb808
+CROSS_DIGEST_armv7-unknown-linux-gnueabihf  := sha256:73294ebb06e077e49bbbecfe8f17507e9e0b733a2a1ba23056abcd9c0ba617c9
+CROSS_DIGEST_armv7-unknown-linux-musleabihf := sha256:49bdc9a4cf2f1bcb385389c85be8f43c4399fa6d6fe22883702ef13eb921e443
+CROSS_DIGEST_arm-unknown-linux-gnueabi      := sha256:0c70b0e54724bd599dff00a2888f8ea176a5b6c85af47aad9ad25296f63e2967
+CROSS_DIGEST_arm-unknown-linux-musleabi     := sha256:0ca8f4afcc29fb5964aa63e482452e8869311a610c5868f22ded400c4e483328
+
 # GNU Make < 3.82 pattern matching priority depends on the definition order
 # so cross-image-% must be defined before cross-%
 .PHONY: cross-image-%
 cross-image-%: export TRIPLE =$($(strip @):cross-image-%=%)
 cross-image-%:
+	$(if $(CROSS_DIGEST_$*),,$(error No CROSS_DIGEST pinned for $*. Add it to the digest table in Makefile.))
 	$(CONTAINER_TOOL) build \
+		--build-arg TARGET=${TRIPLE} \
+		--build-arg CROSS_DIGEST=$(CROSS_DIGEST_$*) \
+		--file scripts/cross/Dockerfile \
 		--tag vector-cross-env:${TRIPLE} \
-		--file scripts/cross/${TRIPLE}.dockerfile \
 		.
 
 # This is basically a shorthand for folks.
@@ -337,7 +369,7 @@ target/%/vector.tar.gz: target/%/vector CARGO_HANDLES_FRESHNESS
 # https://github.com/rust-lang/cargo/issues/6454
 .PHONY: test
 test: ## Run the unit test suite
-	${MAYBE_ENVIRONMENT_EXEC} cargo nextest run --workspace --no-fail-fast --no-default-features --features "${FEATURES}" ${SCOPE}
+	${MAYBE_ENVIRONMENT_EXEC} ${TEST_RUNNER} --workspace --no-fail-fast --no-default-features --features "${FEATURES}" ${SCOPE}
 
 .PHONY: test-docs
 test-docs: ## Run the docs test suite
@@ -361,7 +393,7 @@ test-behavior-config: ## Runs configuration related behavioral tests
 
 .PHONY: test-behavior-%
 test-behavior-%: ## Runs behavioral test for a given category
-	${MAYBE_ENVIRONMENT_EXEC} cargo run --no-default-features --features transforms -- test tests/behavior/$*/*
+	${MAYBE_ENVIRONMENT_EXEC} cargo run --no-default-features --features transforms,vrl-functions-env,vrl-functions-system,vrl-functions-network,vrl-functions-crypto -- test tests/behavior/$*/*
 
 .PHONY: test-behavior
 test-behavior: ## Runs all behavioral tests
@@ -377,11 +409,19 @@ test-integration: test-integration-nginx test-integration-opentelemetry test-int
 test-integration: test-integration-redis test-integration-splunk test-integration-dnstap test-integration-datadog-agent test-integration-datadog-logs test-integration-e2e-datadog-logs test-integration-e2e-opentelemetry-logs
 test-integration: test-integration-datadog-traces test-integration-shutdown
 
+.PHONY: test-integration-windows-event-log
+test-integration-windows-event-log: ## Runs Windows Event Log integration tests (Windows only)
+ifeq ($(OS),Windows_NT)
+	${MAYBE_ENVIRONMENT_EXEC} cargo test -p vector --no-default-features --features sources-windows_event_log-integration-tests windows_event_log::integration_tests
+else
+	@echo "Skipping windows-event-log integration tests (Windows only)"
+endif
+
 test-integration-%-cleanup:
-	cargo vdev --verbose integration stop $*
+	$(VDEV) --verbose integration stop $*
 
 test-integration-%:
-	cargo vdev --verbose integration test $*
+	$(VDEV) --verbose integration test $*
 ifeq ($(AUTODESPAWN), true)
 	make test-integration-$*-cleanup
 endif
@@ -392,11 +432,19 @@ test-e2e-kubernetes: ## Runs Kubernetes E2E tests (Sorry, no `ENVIRONMENT=true` 
 
 .PHONY: test-cli
 test-cli: ## Runs cli tests
-	${MAYBE_ENVIRONMENT_EXEC} cargo nextest run --no-fail-fast --no-default-features --features cli-tests --test integration --test-threads 4
+	${MAYBE_ENVIRONMENT_EXEC} ${TEST_RUNNER} --no-fail-fast --no-default-features --features cli-tests --test integration --test-threads 4
+
+.PHONY: test-vector-api
+test-vector-api: ## Runs vector API tests (top and tap)
+	${MAYBE_ENVIRONMENT_EXEC} ${TEST_RUNNER} --no-fail-fast --no-default-features --features vector-api-tests --test vector_api
 
 .PHONY: test-component-validation
 test-component-validation: ## Runs component validation tests
-	${MAYBE_ENVIRONMENT_EXEC} cargo nextest run --no-fail-fast --no-default-features --features component-validation-tests --status-level pass --test-threads 4 components::validation::tests
+	${MAYBE_ENVIRONMENT_EXEC} ${TEST_RUNNER} --no-fail-fast --no-default-features --features component-validation-tests --status-level pass --test-threads 4 --lib components::validation::tests
+
+.PHONY: coverage-report
+coverage-report: ## Generate lcov report after running tests with COVERAGE=true (outputs lcov.info)
+	cargo llvm-cov report --lcov --output-path lcov.info
 
 ##@ Benching (Supports `ENVIRONMENT=true`)
 
@@ -450,205 +498,122 @@ bench-all: bench-remap-functions
 
 .PHONY: check
 check: ## Run prerequisite code checks
-	${MAYBE_ENVIRONMENT_EXEC} cargo vdev check rust
+	${MAYBE_ENVIRONMENT_EXEC} $(VDEV) check rust
 
 .PHONY: check-all
 check-all: ## Check everything
 check-all: check-fmt check-clippy check-docs
-check-all: check-version check-examples check-component-features
-check-all: check-scripts check-deny check-component-docs check-licenses
+check-all: check-examples check-component-features
+check-all: check-scripts check-deny check-generated-docs check-licenses
 
 .PHONY: check-component-features
 check-component-features: ## Check that all component features are setup properly
-	${MAYBE_ENVIRONMENT_EXEC} cargo vdev check component-features
+	${MAYBE_ENVIRONMENT_EXEC} $(VDEV) check component-features
 
 .PHONY: check-clippy
 check-clippy: ## Check code with Clippy
-	${MAYBE_ENVIRONMENT_EXEC} cargo vdev check rust --clippy
+	${MAYBE_ENVIRONMENT_EXEC} $(VDEV) check rust
 
 .PHONY: check-docs
-check-docs: ## Check that all /docs file are valid
-	${MAYBE_ENVIRONMENT_EXEC} cargo vdev check docs
+check-docs: generate-vrl-docs ## Check that all /docs file are valid - vrl docs due to remap.functions.* references
+	${MAYBE_ENVIRONMENT_EXEC} $(VDEV) check docs
 
 .PHONY: check-fmt
 check-fmt: ## Check that all files are formatted properly
-	${MAYBE_ENVIRONMENT_EXEC} cargo vdev check fmt
+	${MAYBE_ENVIRONMENT_EXEC} $(VDEV) check fmt
 
 .PHONY: check-licenses
 check-licenses: ## Check that the 3rd-party license file is up to date
-	${MAYBE_ENVIRONMENT_EXEC} cargo vdev check licenses
+	${MAYBE_ENVIRONMENT_EXEC} $(VDEV) check licenses
 
 .PHONY: check-markdown
 check-markdown: ## Check that markdown is styled properly
-	${MAYBE_ENVIRONMENT_EXEC} cargo vdev check markdown
+	${MAYBE_ENVIRONMENT_EXEC} $(VDEV) check markdown
 
-.PHONY: check-version
-check-version: ## Check that Vector's version is correct accounting for recent changes
-	${MAYBE_ENVIRONMENT_EXEC} cargo vdev check version
+.PHONY: fix-markdown
+fix-markdown: ## Auto-fix markdown style issues
+	${MAYBE_ENVIRONMENT_EXEC} markdownlint-cli2 --fix $(shell git ls-files '*.md')
+
+.PHONY: check-prettier
+check-prettier: ## Check that JS/TS/YAML/JSON files are formatted with prettier
+	@for ext in yml yaml js ts tsx json; do \
+		files=$$(git ls-files "*.$$ext"); \
+		if [ -n "$$files" ]; then \
+			${MAYBE_ENVIRONMENT_EXEC} prettier --ignore-path .prettierignore --check $$files || exit 1; \
+		fi; \
+	done
+
+.PHONY: fix-prettier
+fix-prettier: ## Auto-fix JS/TS/YAML/JSON formatting with prettier
+	@for ext in yml yaml js ts tsx json; do \
+		files=$$(git ls-files "*.$$ext"); \
+		if [ -n "$$files" ]; then \
+			${MAYBE_ENVIRONMENT_EXEC} prettier --ignore-path .prettierignore --write $$files || exit 1; \
+		fi; \
+	done
 
 .PHONY: check-examples
 check-examples: ## Check that the config/examples files are valid
-	${MAYBE_ENVIRONMENT_EXEC} cargo vdev check examples
+	${MAYBE_ENVIRONMENT_EXEC} $(VDEV) check examples
 
 .PHONY: check-scripts
 check-scripts: ## Check that scripts do not have common mistakes
-	${MAYBE_ENVIRONMENT_EXEC} cargo vdev check scripts
+	${MAYBE_ENVIRONMENT_EXEC} $(VDEV) check scripts
 
 .PHONY: check-deny
 check-deny: ## Check advisories licenses and sources for crate dependencies
-	${MAYBE_ENVIRONMENT_EXEC} cargo vdev check deny
+	${MAYBE_ENVIRONMENT_EXEC} $(VDEV) check deny
+
+.PHONY: check-deny-licenses
+check-deny-licenses: ## Check licenses for crate dependencies
+	${MAYBE_ENVIRONMENT_EXEC} $(VDEV) check deny --licenses-only
 
 .PHONY: check-events
 check-events: ## Check that events satisfy patterns set in https://github.com/vectordotdev/vector/blob/master/rfcs/2020-03-17-2064-event-driven-observability.md
-	${MAYBE_ENVIRONMENT_EXEC} cargo vdev check events
+	${MAYBE_ENVIRONMENT_EXEC} $(VDEV) check events
 
-.PHONY: check-component-docs
-check-component-docs: generate-component-docs ## Checks that the machine-generated component Cue docs are up-to-date.
-	${MAYBE_ENVIRONMENT_EXEC} cargo vdev check component-docs
+.PHONY: check-generated-docs
+check-generated-docs: generate-docs ## Checks that the machine-generated component Cue docs are up-to-date.
+	${MAYBE_ENVIRONMENT_EXEC} $(VDEV) check generated-docs
 
 ##@ Rustdoc
 build-rustdoc: ## Build Vector's Rustdocs
 	# This command is mostly intended for use by the build process in vectordotdev/vector-rustdoc
 	${MAYBE_ENVIRONMENT_EXEC} cargo doc --no-deps --workspace
 
-##@ Packaging
+##@ Packaging (forwarded to Makefile.packaging)
 
-# archives
-target/artifacts/vector-${VERSION}-%.tar.gz: export TRIPLE :=$(@:target/artifacts/vector-${VERSION}-%.tar.gz=%)
-target/artifacts/vector-${VERSION}-%.tar.gz: override PROFILE =release
-target/artifacts/vector-${VERSION}-%.tar.gz: target/%/release/vector.tar.gz
-	@echo "Built to ${<}, relocating to ${@}"
-	@mkdir -p target/artifacts/
-	@cp -v \
-		${<} \
-		${@}
+# Packaging targets that depend on VERSION live in Makefile.packaging to avoid
+# running `cargo vdev version` when invoking non-packaging targets.
 
 .PHONY: package
 package: build ## Build the Vector archive
-	${MAYBE_ENVIRONMENT_EXEC} cargo vdev package archive
+	${MAYBE_ENVIRONMENT_EXEC} $(VDEV) package archive
 
-.PHONY: package-x86_64-unknown-linux-gnu-all
-package-x86_64-unknown-linux-gnu-all: package-x86_64-unknown-linux-gnu package-deb-x86_64-unknown-linux-gnu package-rpm-x86_64-unknown-linux-gnu # Build all x86_64 GNU packages
-
-.PHONY: package-x86_64-unknown-linux-musl-all
-package-x86_64-unknown-linux-musl-all: package-x86_64-unknown-linux-musl # Build all x86_64 MUSL packages
-
-.PHONY: package-aarch64-unknown-linux-musl-all
-package-aarch64-unknown-linux-musl-all: package-aarch64-unknown-linux-musl # Build all aarch64 MUSL packages
-
-.PHONY: package-aarch64-unknown-linux-gnu-all
-package-aarch64-unknown-linux-gnu-all: package-aarch64-unknown-linux-gnu package-deb-aarch64 package-rpm-aarch64 # Build all aarch64 GNU packages
-
-.PHONY: package-armv7-unknown-linux-gnueabihf-all
-package-armv7-unknown-linux-gnueabihf-all: package-armv7-unknown-linux-gnueabihf package-deb-armv7-gnu package-rpm-armv7hl-gnu  # Build all armv7-unknown-linux-gnueabihf MUSL packages
-
-.PHONY: package-arm-unknown-linux-gnueabi-all
-package-arm-unknown-linux-gnueabi-all: package-arm-unknown-linux-gnueabi package-deb-arm-gnu  # Build all arm-unknown-linux-gnueabihf GNU packages
-
-.PHONY: package-x86_64-unknown-linux-gnu
-package-x86_64-unknown-linux-gnu: target/artifacts/vector-${VERSION}-x86_64-unknown-linux-gnu.tar.gz ## Build an archive suitable for the `x86_64-unknown-linux-gnu` triple.
-	@echo "Output to ${<}."
-
-.PHONY: package-x86_64-unknown-linux-musl
-package-x86_64-unknown-linux-musl: target/artifacts/vector-${VERSION}-x86_64-unknown-linux-musl.tar.gz ## Build an archive suitable for the `x86_64-unknown-linux-musl` triple.
-	@echo "Output to ${<}."
-
-.PHONY: package-aarch64-unknown-linux-musl
-package-aarch64-unknown-linux-musl: target/artifacts/vector-${VERSION}-aarch64-unknown-linux-musl.tar.gz ## Build an archive suitable for the `aarch64-unknown-linux-musl` triple.
-	@echo "Output to ${<}."
-
-.PHONY: package-aarch64-unknown-linux-gnu
-package-aarch64-unknown-linux-gnu: target/artifacts/vector-${VERSION}-aarch64-unknown-linux-gnu.tar.gz ## Build an archive suitable for the `aarch64-unknown-linux-gnu` triple.
-	@echo "Output to ${<}."
-
-.PHONY: package-armv7-unknown-linux-gnueabihf
-package-armv7-unknown-linux-gnueabihf: target/artifacts/vector-${VERSION}-armv7-unknown-linux-gnueabihf.tar.gz ## Build an archive suitable for the `armv7-unknown-linux-gnueabihf` triple.
-	@echo "Output to ${<}."
-
-.PHONY: package-armv7-unknown-linux-musleabihf
-package-armv7-unknown-linux-musleabihf: target/artifacts/vector-${VERSION}-armv7-unknown-linux-musleabihf.tar.gz ## Build an archive suitable for the `armv7-unknown-linux-musleabihf triple.
-	@echo "Output to ${<}."
-
-.PHONY: package-arm-unknown-linux-gnueabi
-package-arm-unknown-linux-gnueabi: target/artifacts/vector-${VERSION}-arm-unknown-linux-gnueabi.tar.gz ## Build an archive suitable for the `arm-unknown-linux-gnueabi` triple.
-	@echo "Output to ${<}."
-
-.PHONY: package-arm-unknown-linux-musleabi
-package-arm-unknown-linux-musleabi: target/artifacts/vector-${VERSION}-arm-unknown-linux-musleabi.tar.gz ## Build an archive suitable for the `arm-unknown-linux-musleabi` triple.
-	@echo "Output to ${<}."
-
-# debs
-
-.PHONY: package-deb-x86_64-unknown-linux-gnu
-package-deb-x86_64-unknown-linux-gnu: package-x86_64-unknown-linux-gnu ## Build the x86_64 GNU deb package
-	$(CONTAINER_TOOL) run -v  $(PWD):/git/vectordotdev/vector/ -e TARGET=x86_64-unknown-linux-gnu -e VECTOR_VERSION $(ENVIRONMENT_UPSTREAM) cargo vdev package deb
-
-.PHONY: package-deb-x86_64-unknown-linux-musl
-package-deb-x86_64-unknown-linux-musl: package-x86_64-unknown-linux-musl ## Build the x86_64 GNU deb package
-	$(CONTAINER_TOOL) run -v  $(PWD):/git/vectordotdev/vector/ -e TARGET=x86_64-unknown-linux-musl -e VECTOR_VERSION $(ENVIRONMENT_UPSTREAM) cargo vdev package deb
-
-.PHONY: package-deb-aarch64
-package-deb-aarch64: package-aarch64-unknown-linux-gnu ## Build the aarch64 deb package
-	$(CONTAINER_TOOL) run -v  $(PWD):/git/vectordotdev/vector/ -e TARGET=aarch64-unknown-linux-gnu -e VECTOR_VERSION $(ENVIRONMENT_UPSTREAM) cargo vdev package deb
-
-.PHONY: package-deb-armv7-gnu
-package-deb-armv7-gnu: package-armv7-unknown-linux-gnueabihf ## Build the armv7-unknown-linux-gnueabihf deb package
-	$(CONTAINER_TOOL) run -v  $(PWD):/git/vectordotdev/vector/ -e TARGET=armv7-unknown-linux-gnueabihf -e VECTOR_VERSION $(ENVIRONMENT_UPSTREAM) cargo vdev package deb
-
-.PHONY: package-deb-arm-gnu
-package-deb-arm-gnu: package-arm-unknown-linux-gnueabi ## Build the arm-unknown-linux-gnueabi deb package
-	$(CONTAINER_TOOL) run -v  $(PWD):/git/vectordotdev/vector/ -e TARGET=arm-unknown-linux-gnueabi -e VECTOR_VERSION $(ENVIRONMENT_UPSTREAM) cargo vdev package deb
-
-# rpms
-
-.PHONY: package-rpm-x86_64-unknown-linux-gnu
-package-rpm-x86_64-unknown-linux-gnu: package-x86_64-unknown-linux-gnu ## Build the x86_64 rpm package
-	$(CONTAINER_TOOL) run -v  $(PWD):/git/vectordotdev/vector/ -e TARGET=x86_64-unknown-linux-gnu -e VECTOR_VERSION $(ENVIRONMENT_UPSTREAM) cargo vdev package rpm
-
-.PHONY: package-rpm-x86_64-unknown-linux-musl
-package-rpm-x86_64-unknown-linux-musl: package-x86_64-unknown-linux-musl ## Build the x86_64 musl rpm package
-	$(CONTAINER_TOOL) run -v  $(PWD):/git/vectordotdev/vector/ -e TARGET=x86_64-unknown-linux-musl -e VECTOR_VERSION $(ENVIRONMENT_UPSTREAM) cargo vdev package rpm
-
-.PHONY: package-rpm-aarch64
-package-rpm-aarch64: package-aarch64-unknown-linux-gnu ## Build the aarch64 rpm package
-	$(CONTAINER_TOOL) run -v  $(PWD):/git/vectordotdev/vector/ -e TARGET=aarch64-unknown-linux-gnu -e VECTOR_VERSION $(ENVIRONMENT_UPSTREAM) cargo vdev package rpm
-
-.PHONY: package-rpm-armv7hl-gnu
-package-rpm-armv7hl-gnu: package-armv7-unknown-linux-gnueabihf ## Build the armv7hl-unknown-linux-gnueabihf rpm package
-	$(CONTAINER_TOOL) run -v  $(PWD):/git/vectordotdev/vector/ -e TARGET=armv7-unknown-linux-gnueabihf -e ARCH=armv7hl -e VECTOR_VERSION $(ENVIRONMENT_UPSTREAM) cargo vdev package rpm
+package-%:
+	$(MAKE) -f Makefile.packaging $@
 
 ##@ Releasing
 
-.PHONY: release
-release: release-prepare generate release-commit ## Release a new Vector version
-
-.PHONY: release-commit
-release-commit: ## Commits release changes
-	@cargo vdev release commit
-
 .PHONY: release-docker
 release-docker: ## Release to Docker Hub
-	@cargo vdev release docker
+	@$(VDEV) release docker
 
 .PHONY: release-github
 release-github: ## Release to GitHub
-	@cargo vdev release github
+	@$(VDEV) release github
 
 .PHONY: release-homebrew
 release-homebrew: ## Release to vectordotdev Homebrew tap
-	@cargo vdev release homebrew
+	@$(VDEV) release homebrew --vector-version $(VECTOR_VERSION)
 
 .PHONY: release-prepare
 release-prepare: ## Prepares the release with metadata and highlights
-	@cargo vdev release prepare
-
-.PHONY: release-push
-release-push: ## Push new Vector version
-	@cargo vdev release push
+	@$(VDEV) release prepare
 
 .PHONY: release-s3
 release-s3: ## Release artifacts to S3
-	@cargo vdev release s3
+	@$(VDEV) release s3
 
 .PHONY: sha256sum
 sha256sum: ## Generate SHA256 checksums of CI artifacts
@@ -658,11 +623,11 @@ sha256sum: ## Generate SHA256 checksums of CI artifacts
 
 .PHONY: test-vrl
 test-vrl: ## Run the VRL test suite
-	@cargo vdev test-vrl
+	@$(VDEV) test-vrl
 
 .PHONY: compile-vrl-wasm
 compile-vrl-wasm: ## Compile VRL crates to WASM target
-	cargo vdev build vrl-wasm
+	$(VDEV) build vrl-wasm
 
 ##@ Utility
 
@@ -670,20 +635,36 @@ compile-vrl-wasm: ## Compile VRL crates to WASM target
 clean: environment-clean ## Clean everything
 	cargo clean
 
-.PHONY: fmt
-fmt: ## Format code
-	${MAYBE_ENVIRONMENT_EXEC} cargo fmt
-
 .PHONY: generate-kubernetes-manifests
 generate-kubernetes-manifests: ## Generate Kubernetes manifests from latest Helm chart
-	cargo vdev build manifests
+	$(VDEV) build manifests
 
 .PHONY: generate-component-docs
 generate-component-docs: ## Generate per-component Cue docs from the configuration schema.
 	${MAYBE_ENVIRONMENT_EXEC} cargo build $(if $(findstring true,$(CI)),--quiet,)
 	target/debug/vector generate-schema > /tmp/vector-config-schema.json 2>/dev/null
-	${MAYBE_ENVIRONMENT_EXEC} cargo vdev build component-docs /tmp/vector-config-schema.json \
+	${MAYBE_ENVIRONMENT_EXEC} $(VDEV) build component-docs /tmp/vector-config-schema.json \
 		$(if $(findstring true,$(CI)),>/dev/null,)
+	./scripts/cue.sh fmt
+
+VRL_DOC_BUILDER := $(shell command -v vector-vrl-doc-builder 2>/dev/null)
+ifndef VRL_DOC_BUILDER
+VRL_DOC_BUILDER_CMD = cargo run -p vector-vrl-doc-builder --
+else
+VRL_DOC_BUILDER_CMD = vector-vrl-doc-builder
+endif
+
+.PHONY: generate-vector-vrl-docs
+generate-vector-vrl-docs: ## Generate VRL function documentation from Rust source.
+	${MAYBE_ENVIRONMENT_EXEC} $(VRL_DOC_BUILDER_CMD) --output docs/generated/ \
+		$(if $(findstring true,$(CI)),>/dev/null,)
+
+.PHONY: generate-vrl-docs
+generate-vrl-docs: ## Generate combined VRL function documentation for the website.
+	$(MAKE) -C website generate-vrl-docs
+
+.PHONY: generate-docs
+generate-docs: generate-component-docs generate-vector-vrl-docs generate-vrl-docs
 
 .PHONY: signoff
 signoff: ## Signsoff all previous commits since branch creation
@@ -691,7 +672,7 @@ signoff: ## Signsoff all previous commits since branch creation
 
 .PHONY: version
 version: ## Get the current Vector version
-	@cargo vdev version
+	@$(VDEV) version
 
 .PHONY: git-hooks
 git-hooks: ## Add Vector-local git hooks for commit sign-off
@@ -704,4 +685,16 @@ cargo-install-%:
 
 .PHONY: ci-generate-publish-metadata
 ci-generate-publish-metadata: ## Generates the necessary metadata required for building/publishing Vector.
-	cargo vdev build publish-metadata
+	$(VDEV) build publish-metadata
+
+.PHONY: clippy-fix
+clippy-fix:
+	${MAYBE_ENVIRONMENT_EXEC} $(VDEV) check rust --fix
+
+.PHONY: fmt
+fmt:
+	${MAYBE_ENVIRONMENT_EXEC} $(VDEV) fmt
+
+.PHONY: build-licenses
+build-licenses:
+	${MAYBE_ENVIRONMENT_EXEC} $(VDEV) build licenses

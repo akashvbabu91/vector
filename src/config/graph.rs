@@ -1,10 +1,14 @@
-use super::{
-    schema, ComponentKey, DataType, OutputId, SinkOuter, SourceOuter, SourceOutput, TransformOuter,
-    TransformOutput, WildcardMatching,
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    fmt,
 };
-use indexmap::{set::IndexSet, IndexMap};
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::fmt;
+
+use indexmap::{IndexMap, set::IndexSet};
+
+use super::{
+    ComponentKey, DataType, OutputId, SinkOuter, SourceOuter, SourceOutput, TransformContext,
+    TransformOuter, TransformOutput, WildcardMatching, schema,
+};
 
 #[derive(Debug, Clone)]
 pub enum Node {
@@ -108,9 +112,11 @@ impl Graph {
                 Node::Transform {
                     in_ty: transform.inner.input().data_type(),
                     outputs: transform.inner.outputs(
-                        vector_lib::enrichment::TableRegistry::default(),
+                        &TransformContext {
+                            schema,
+                            ..Default::default()
+                        },
                         &[(id.into(), schema::Definition::any())],
-                        schema.log_namespace(),
                     ),
                 },
             );
@@ -177,7 +183,9 @@ impl Graph {
                     // using value != glob::Pattern::escape(value) to check if value is a glob
                     // TODO: replace with proper check when https://github.com/rust-lang/glob/issues/72 is resolved
                     if from != glob::Pattern::escape(from) {
-                        info!("Input \"{from}\" for {output_type} \"{to}\" didn’t match any components, but this was ignored because `relaxed_wildcard_matching` is enabled.");
+                        info!(
+                            "Input \"{from}\" for {output_type} \"{to}\" didn’t match any components, but this was ignored because `relaxed_wildcard_matching` is enabled."
+                        );
                         return Ok(());
                     }
                 }

@@ -1,8 +1,8 @@
-use super::config::AmqpSinkConfig;
-use super::service::AmqpError;
-use crate::amqp::AmqpConfig;
 use deadpool::managed::Pool;
 use lapin::options::ConfirmSelectOptions;
+
+use super::{config::AmqpSinkConfig, service::AmqpError};
+use crate::amqp::AmqpConfig;
 
 pub type AmqpSinkChannels = Pool<AmqpSinkChannelManager>;
 
@@ -42,7 +42,6 @@ impl deadpool::managed::Manager for AmqpSinkChannelManager {
         info!(
             message = "Created a new channel to the AMQP broker.",
             id = channel.id(),
-            internal_log_rate_limit = true,
         );
         Ok(channel)
     }
@@ -52,11 +51,14 @@ impl deadpool::managed::Manager for AmqpSinkChannelManager {
         channel: &mut Self::Type,
         _: &deadpool::managed::Metrics,
     ) -> deadpool::managed::RecycleResult<Self::Error> {
-        let state = channel.status().state();
-        if state == lapin::ChannelState::Connected {
+        let status = channel.status();
+        if status.connected() {
             Ok(())
         } else {
-            Err((AmqpError::ChannelClosed { state }).into())
+            Err((AmqpError::ChannelClosed {
+                status: status.clone(),
+            })
+            .into())
         }
     }
 }

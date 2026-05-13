@@ -1,9 +1,9 @@
 //! Implementation of the `http` sink.
 
-use crate::sinks::{prelude::*, util::http::HttpRequest};
 use std::collections::BTreeMap;
 
 use super::{batch::HttpBatchSizer, request_builder::HttpRequestBuilder};
+use crate::sinks::{prelude::*, util::http::HttpRequest};
 
 pub(super) struct HttpSink<S> {
     service: S,
@@ -43,9 +43,11 @@ where
         };
         input
             // Batch the input stream with size calculation based on the configured codec
-            .batched_partitioned(KeyPartitioner::new(self.uri, self.headers), || {
-                self.batch_settings.as_item_size_config(batch_sizer.clone())
-            })
+            .batched_partitioned(
+                KeyPartitioner::new(self.uri, self.headers),
+                self.batch_settings.timeout,
+                |_| self.batch_settings.as_item_size_config(batch_sizer.clone()),
+            )
             .filter_map(|(key, batch)| async move { key.map(move |k| (k, batch)) })
             // Build requests with default concurrency limit.
             .request_builder(

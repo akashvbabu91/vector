@@ -1,12 +1,21 @@
-use crate::codecs::{EncodingConfigWithFraming, Transformer};
-use crate::config::{AcknowledgementsConfig, Input, SinkConfig, SinkContext};
-use crate::sinks::http::config::{HttpMethod, HttpSinkConfig};
-use crate::sinks::{Healthcheck, VectorSink};
 use indoc::indoc;
 use vector_config::component::GenerateConfig;
-use vector_lib::codecs::encoding::{FramingConfig, SerializerConfig};
-use vector_lib::codecs::JsonSerializerConfig;
-use vector_lib::configurable::configurable_component;
+use vector_lib::{
+    codecs::{
+        JsonSerializerConfig,
+        encoding::{FramingConfig, SerializerConfig},
+    },
+    configurable::configurable_component,
+};
+
+use crate::{
+    codecs::{EncodingConfigWithFraming, Transformer},
+    config::{AcknowledgementsConfig, Input, SinkConfig, SinkContext},
+    sinks::{
+        Healthcheck, VectorSink,
+        http::config::{HttpMethod, HttpSinkConfig},
+    },
+};
 
 /// Configuration for the `OpenTelemetry` sink.
 #[configurable_component(sink("opentelemetry", "Deliver OTLP data over HTTP."))]
@@ -40,7 +49,6 @@ impl Default for Protocol {
             uri: Default::default(),
             method: HttpMethod::Post,
             auth: Default::default(),
-            headers: Default::default(),
             compression: Default::default(),
             payload_prefix: Default::default(),
             payload_suffix: Default::default(),
@@ -48,6 +56,7 @@ impl Default for Protocol {
             request: Default::default(),
             tls: Default::default(),
             acknowledgements: Default::default(),
+            retry_strategy: Default::default(),
         })
     }
 }

@@ -9,12 +9,18 @@ on:
   pull_request:
     types: [opened, edited, synchronize]
 
+permissions:
+  contents: read
+
 jobs:
   main:
+    permissions:
+      pull-requests: read # for amannn/action-semantic-pull-request to analyze PRs
+      statuses: write # for amannn/action-semantic-pull-request to mark status of analyzed PR
     name: Check Semantic PR
     runs-on: ubuntu-24.04
     steps:
-      - uses: amannn/action-semantic-pull-request@0723387faaf9b38adef4775cd42cfd5155ed6017 # v5.5.3
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -28,28 +34,27 @@ jobs:
             revert
 
           scopes: |
-            new source
-            new transform
-            new sink
-            ARC
             administration
             api
+            api top
+            api tap
+            ARC
             architecture
             auth
             buffers
             ci
             cli
             codecs
-            codecs protobuf
             compression
             config
+            config provider
             core
             data model
             delivery
             deployment
+            deprecations
             deps
             dev
-            vdev
             durability
             enriching
             enrichment tables
@@ -58,12 +63,16 @@ jobs:
             external
             external docs
             filtering
+            feature flags
             healthchecks
             internal
             internal docs
             logs
             metrics
             networking
+            new sink
+            new source
+            new transform
             observability
             parsing
             performance
@@ -88,7 +97,9 @@ jobs:
             traces
             transforms
             unit tests
+            vdev
             vrl
+
             amazon-linux platform
             apt platform
             arm platform
@@ -113,7 +124,6 @@ jobs:
             x86_64 platform
             yum platform
 
-            service providers
             aws service
             azure service
             confluent service
@@ -129,8 +139,10 @@ jobs:
             new relic service
             papertrail service
             sematext service
+            service providers
             splunk service
             yandex service
+
             apache_metrics source
             aws_ecs_metrics source
             aws_kinesis_firehose source
@@ -148,6 +160,7 @@ jobs:
             heroku_logs source
             host_metrics source
             http_client source
+            http_server source
             http_scrape source
             internal_logs source
             internal_metrics source
@@ -156,8 +169,11 @@ jobs:
             kubernetes_logs source
             logstash source
             mongodb_metrics source
+            mqtt source
+            nats source
             new source
             nginx_metrics source
+            okta source
             opentelemetry source
             postgresql_metrics source
             prometheus_remote_write source
@@ -171,8 +187,11 @@ jobs:
             syslog source
             vector source
             websocket source
+
+            aggregate transform
             aws_ec2_metadata transform
             dedupe transform
+            exclusive_route transform
             filter transform
             geoip transform
             log_to_metric transform
@@ -183,10 +202,10 @@ jobs:
             reduce transform
             remap transform
             route transform
-            exclusive_route transform
             sample transform
             tag_cardinality_limit transform
             throttle transform
+
             amqp sink
             apex sink
             aws_cloudwatch_logs sink
@@ -197,15 +216,17 @@ jobs:
             aws_sqs sink
             axiom sink
             azure_blob sink
+            azure_logs_ingestion sink
             azure_monitor_logs sink
             blackhole sink
             clickhouse sink
             console sink
-            datadog_common sink
             datadog_archives sink
+            datadog_common sink
             datadog_events sink
             datadog_logs sink
             datadog_metrics sink
+            doris sink
             elasticsearch sink
             file sink
             gcp_chronicle sink
@@ -213,8 +234,8 @@ jobs:
             gcp_pubsub sink
             gcp_stackdriver_logs sink
             gcp_stackdriver_metrics sink
-            greptimedb_metrics sink
             greptimedb_logs sink
+            greptimedb_metrics sink
             honeycomb sink
             http sink
             humio_logs sink
@@ -224,6 +245,7 @@ jobs:
             kafka sink
             logdna sink
             loki sink
+            mqtt sink
             nats sink
             new sink
             new_relic sink
@@ -243,6 +265,7 @@ jobs:
             vector sink
             websocket sink
             websocket_server sink
+
             blog website
             css website
             guides website
@@ -253,5 +276,6 @@ jobs:
             website
             website deps
 
-            config provider
+            vrl playground
+
             opentelemetry lib

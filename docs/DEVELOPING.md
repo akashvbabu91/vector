@@ -14,6 +14,7 @@
   - [Minimum Supported Rust Version](#minimum-supported-rust-version)
 - [Guidelines](#guidelines)
   - [Sink healthchecks](#sink-healthchecks)
+  - [Disabling internal log rate limiting](#disabling-internal-log-rate-limiting)
 - [Testing](#testing)
   - [Unit tests](#unit-tests)
   - [Integration tests](#integration-tests)
@@ -122,11 +123,24 @@ To build Vector on your own host will require a fairly complete development envi
 Loosely, you'll need the following:
 
 - **To build Vector:** Have working Rustup, Protobuf tools, C++/C build tools (LLVM, GCC, or MSVC), Python, and Perl, `make` (the GNU one preferably), `bash`, `cmake`, `GNU coreutils`, and `autotools`.
+  - You may also need to install `libsasl2` if you are compiling with default features or with any `kafka`-related features.
+    - Installing libsasl2 on Ubuntu
+      - Run `sudo apt-get install -y libsasl2-dev`
+    - Installing libsasl2 on MacOS
+      - Run `brew install cyrus-sasl`
+      - You will need to set the following environment variables:
+
+        ```bash
+        export LDFLAGS="-L$(brew --prefix cyrus-sasl)/lib $LDFLAGS"
+        export CPPFLAGS="-I$(brew --prefix cyrus-sasl)/include $CPPFLAGS"
+        export PKG_CONFIG_PATH="$(brew --prefix cyrus-sasl)/lib/pkgconfig:$PKG_CONFIG_PATH"
+        ```
+
 - **To run `make test`:** Install [`cargo-nextest`](https://nexte.st/)
 - **To run integration tests:** Have `docker` available, or a real live version of that service. (Use `AUTOSPAWN=false`)
 - **To run `make check-component-features`:** Have `remarshal` installed.
-- **To run `make check-licenses` or `cargo vdev build licenses`:** Have `dd-rust-license-tool` [installed](https://github.com/DataDog/rust-license-tool).
-- **To run `make generate-component-docs`:** Have `cue` [installed](https://cuelang.org/docs/install/).
+- **To run `make check-licenses` or `make build-licenses`:** Have `dd-rust-license-tool` [installed](https://github.com/DataDog/rust-license-tool).
+- **To run `make generate-docs`:** Have `cue` [installed](https://cuelang.org/docs/install/).
 
 If you find yourself needing to run something inside the Docker environment described above, that's totally fine, they won't collide or hurt each other. In this case, you'd just run `make environment-generate`.
 
@@ -160,8 +174,8 @@ cargo bench transforms::example
 # Format your code before pushing!
 make fmt
 cargo fmt
-# Build component documentation for the website
-make generate-component-docs
+# Build component and VRL documentation for the website
+make generate-docs
 ```
 
 If you run `make` you'll see a full list of all our tasks. Some of these will start Docker containers, sign commits, or even make releases. These are not common development commands and your mileage may vary.
@@ -328,6 +342,28 @@ that fall into a false negative circumstance. Our goal should be to minimize the
 likelihood of users needing to pull that lever while still making a good effort
 to detect common problems.
 
+### Disabling internal log rate limiting
+
+Vector rate limits its own internal logs by default (10-second windows). During development, you may want to see all log occurrences.
+
+**Globally** (CLI flag or environment variable):
+
+```bash
+vector --config vector.yaml -r 1
+# or
+VECTOR_INTERNAL_LOG_RATE_LIMIT=1 vector --config vector.yaml
+```
+
+**Per log statement**:
+
+```rust
+// Disable rate limiting for this log
+warn!(message = "Error occurred.", %error, internal_log_rate_limit = false);
+
+// Override rate limit window to 1 second
+info!(message = "Processing batch.", batch_size, internal_log_rate_secs = 1);
+```
+
 ## Testing
 
 Testing is very important since Vector's primary design principle is reliability.
@@ -412,14 +448,7 @@ tests related only to this component, the following approach can reduce waiting
 times:
 
 1. Install [cargo-watch](https://github.com/passcod/cargo-watch).
-2. (Only for GNU/Linux) Install LLVM 9 (for example, package `llvm-9` on Debian)
-   and set `RUSTFLAGS` environment variable to use `lld` as the linker:
-
-   ```sh
-   export RUSTFLAGS='-Clinker=clang-9 -Clink-arg=-fuse-ld=lld'
-   ```
-
-3. Run in the root directory of Vector's source
+2. Run in the root directory of Vector's source
 
    ```sh
    cargo watch -s clear -s \
@@ -438,8 +467,8 @@ times:
 
 We use `flog` to build a sample set of log files to test sending logs from a
 file. This can be done with the following commands on Mac with `homebrew`.
-Installation instruction for flog can be found
-[here](https://github.com/mingrammer/flog#installation).
+Installation instruction for flog can be found in the
+[flog README](https://github.com/mingrammer/flog#installation).
 
 ```bash
 flog --bytes $((100 * 1024 * 1024)) > sample.log

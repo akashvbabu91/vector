@@ -1,6 +1,16 @@
 package metadata
 
 generated: components: sinks: azure_blob: configuration: {
+	account_name: {
+		description: """
+			The Azure Blob Storage Account name.
+
+			If provided, this will be used instead of the `connection_string`.
+			This is useful for authenticating with an Azure credential.
+			"""
+		required: false
+		type: string: examples: ["mylogstorage"]
+	}
 	acknowledgements: {
 		description: """
 			Controls how acknowledgements are handled for this sink.
@@ -12,7 +22,7 @@ generated: components: sinks: azure_blob: configuration: {
 		required: false
 		type: object: options: enabled: {
 			description: """
-				Whether or not end-to-end acknowledgements are enabled.
+				Controls whether or not end-to-end acknowledgements are enabled.
 
 				When enabled for a sink, any source that supports end-to-end
 				acknowledgements that is connected to that sink waits for events
@@ -25,6 +35,123 @@ generated: components: sinks: azure_blob: configuration: {
 				"""
 			required: false
 			type: bool: {}
+		}
+	}
+	auth: {
+		description: "Azure service principal authentication."
+		required:    false
+		type: object: options: {
+			azure_client_id: {
+				description: """
+					The [Azure Client ID][azure_client_id].
+
+					[azure_client_id]: https://learn.microsoft.com/entra/identity-platform/howto-create-service-principal-portal
+					"""
+				relevant_when: "azure_credential_kind = \"client_certificate_credential\" or azure_credential_kind = \"client_secret_credential\""
+				required:      true
+				type: string: examples: ["00000000-0000-0000-0000-000000000000", "${AZURE_CLIENT_ID:?err}"]
+			}
+			azure_client_secret: {
+				description: """
+					The [Azure Client Secret][azure_client_secret].
+
+					[azure_client_secret]: https://learn.microsoft.com/entra/identity-platform/howto-create-service-principal-portal
+					"""
+				relevant_when: "azure_credential_kind = \"client_secret_credential\""
+				required:      true
+				type: string: examples: ["00-00~000000-0000000~0000000000000000000", "${AZURE_CLIENT_SECRET:?err}"]
+			}
+			azure_credential_kind: {
+				description: "The kind of Azure credential to use."
+				required:    true
+				type: string: enum: {
+					azure_cli:                         "Use Azure CLI credentials"
+					client_certificate_credential:     "Use certificate credentials"
+					client_secret_credential:          "Use client ID/secret credentials"
+					managed_identity:                  "Use Managed Identity credentials"
+					managed_identity_client_assertion: "Use Managed Identity with Client Assertion credentials"
+					workload_identity:                 "Use Workload Identity credentials"
+				}
+			}
+			azure_tenant_id: {
+				description: """
+					The [Azure Tenant ID][azure_tenant_id].
+
+					[azure_tenant_id]: https://learn.microsoft.com/entra/identity-platform/howto-create-service-principal-portal
+					"""
+				relevant_when: "azure_credential_kind = \"client_certificate_credential\" or azure_credential_kind = \"client_secret_credential\""
+				required:      true
+				type: string: examples: ["00000000-0000-0000-0000-000000000000", "${AZURE_TENANT_ID:?err}"]
+			}
+			certificate_password: {
+				description:   "The password for the client certificate, if applicable."
+				relevant_when: "azure_credential_kind = \"client_certificate_credential\""
+				required:      false
+				type: string: examples: ["${AZURE_CLIENT_CERTIFICATE_PASSWORD}"]
+			}
+			certificate_path: {
+				description:   "PKCS12 certificate with RSA private key."
+				relevant_when: "azure_credential_kind = \"client_certificate_credential\""
+				required:      true
+				type: string: examples: ["path/to/certificate.pfx", "${AZURE_CLIENT_CERTIFICATE_PATH:?err}"]
+			}
+			client_assertion_client_id: {
+				description:   "The target Client ID to use."
+				relevant_when: "azure_credential_kind = \"managed_identity_client_assertion\""
+				required:      true
+				type: string: examples: ["00000000-0000-0000-0000-000000000000"]
+			}
+			client_assertion_tenant_id: {
+				description:   "The target Tenant ID to use."
+				relevant_when: "azure_credential_kind = \"managed_identity_client_assertion\""
+				required:      true
+				type: string: examples: ["00000000-0000-0000-0000-000000000000"]
+			}
+			client_id: {
+				description: """
+					The [Azure Client ID][azure_client_id]. Defaults to the value of the environment variable `AZURE_CLIENT_ID`.
+
+					[azure_client_id]: https://learn.microsoft.com/entra/identity-platform/howto-create-service-principal-portal
+					"""
+				relevant_when: "azure_credential_kind = \"workload_identity\""
+				required:      false
+				type: string: examples: ["00000000-0000-0000-0000-000000000000", "${AZURE_CLIENT_ID}"]
+			}
+			tenant_id: {
+				description: """
+					The [Azure Tenant ID][azure_tenant_id]. Defaults to the value of the environment variable `AZURE_TENANT_ID`.
+
+					[azure_tenant_id]: https://learn.microsoft.com/entra/identity-platform/howto-create-service-principal-portal
+					"""
+				relevant_when: "azure_credential_kind = \"workload_identity\""
+				required:      false
+				type: string: examples: ["00000000-0000-0000-0000-000000000000", "${AZURE_TENANT_ID}"]
+			}
+			token_file_path: {
+				description:   "Path of a file containing a Kubernetes service account token. Defaults to the value of the environment variable `AZURE_FEDERATED_TOKEN_FILE`."
+				relevant_when: "azure_credential_kind = \"workload_identity\""
+				required:      false
+				type: string: examples: ["/var/run/secrets/azure/tokens/azure-identity-token", "${AZURE_FEDERATED_TOKEN_FILE}"]
+			}
+			user_assigned_managed_identity_id: {
+				description:   "The User Assigned Managed Identity to use."
+				relevant_when: "azure_credential_kind = \"managed_identity\" or azure_credential_kind = \"managed_identity_client_assertion\""
+				required:      false
+				type: string: examples: ["00000000-0000-0000-0000-000000000000"]
+			}
+			user_assigned_managed_identity_id_type: {
+				description: """
+					The type of the User Assigned Managed Identity ID provided (Client ID, Object ID,
+					or Resource ID). Defaults to Client ID.
+					"""
+				relevant_when: "azure_credential_kind = \"managed_identity\" or azure_credential_kind = \"managed_identity_client_assertion\""
+				required:      false
+				type: string: enum: {
+					client_id:   "Client ID"
+					object_id:   "Object ID"
+					resource_id: "Resource ID"
+				}
+			}
 		}
 	}
 	batch: {
@@ -73,6 +200,16 @@ generated: components: sinks: azure_blob: configuration: {
 			"""
 		required: false
 		type: bool: {}
+	}
+	blob_endpoint: {
+		description: """
+			The Azure Blob Storage endpoint.
+
+			If provided, this will be used instead of the `connection_string`.
+			This is useful for authenticating with an Azure credential.
+			"""
+		required: false
+		type: string: examples: ["https://mylogstorage.blob.core.windows.net/"]
 	}
 	blob_prefix: {
 		description: """
@@ -164,11 +301,10 @@ generated: components: sinks: azure_blob: configuration: {
 			| Allowed services       | Blob               |
 			| Allowed resource types | Container & Object |
 			| Allowed permissions    | Read & Create      |
-
-			Either `storage_account`, or this field, must be specified.
 			"""
 		required: false
-		type: string: examples: ["DefaultEndpointsProtocol=https;AccountName=mylogstorage;AccountKey=storageaccountkeybase64encoded;EndpointSuffix=core.windows.net", "BlobEndpoint=https://mylogstorage.blob.core.windows.net/;SharedAccessSignature=generatedsastoken"]
+		type: string: examples: ["DefaultEndpointsProtocol=https;AccountName=mylogstorage;AccountKey=storageaccountkeybase64encoded;EndpointSuffix=core.windows.net", "BlobEndpoint=https://mylogstorage.blob.core.windows.net/;SharedAccessSignature=generatedsastoken", "AccountName=mylogstorage"]
+		warnings: ["Access keys and SAS tokens can be used to gain unauthorized access to Azure Blob Storage resources. Numerous security breaches have occurred due to leaked connection strings. It is important to keep connection strings secure and not expose them in logs, error messages, or version control systems."]
 	}
 	container_name: {
 		description: "The Azure Blob Storage Account container name."
@@ -226,7 +362,7 @@ generated: components: sinks: azure_blob: configuration: {
 					}
 					device_version: {
 						description: """
-																Identifies the version of the problem. The combination of the device product, vendor and this value make up the unique id of the device that sends messages.
+																Identifies the version of the problem. The combination of the device product, vendor, and this value make up the unique id of the device that sends messages.
 																The value length must be less than or equal to 31.
 																"""
 						required: true
@@ -256,7 +392,6 @@ generated: components: sinks: azure_blob: configuration: {
 					severity: {
 						description: """
 																This is a path that points to the field of a log event that reflects importance of the event.
-																Reflects importance of the event.
 
 																It must point to a number from 0 to 10.
 																0 = lowest_importance, 10 = highest_importance.
@@ -337,6 +472,15 @@ generated: components: sinks: azure_blob: configuration: {
 						[vector_native_json]: https://github.com/vectordotdev/vector/blob/master/lib/codecs/tests/data/native_encoding/schema.cue
 						[experimental]: https://vector.dev/highlights/2022-03-31-native-event-codecs
 						"""
+					otlp: """
+						Encodes an event in the [OTLP (OpenTelemetry Protocol)][otlp] format.
+
+						This codec uses protobuf encoding, which is the recommended format for OTLP.
+						The output is suitable for sending to OTLP-compatible endpoints with
+						`content-type: application/x-protobuf`.
+
+						[otlp]: https://opentelemetry.io/docs/specs/otlp/
+						"""
 					protobuf: """
 						Encodes an event as a [Protobuf][protobuf] message.
 
@@ -350,6 +494,10 @@ generated: components: sinks: azure_blob: configuration: {
 						Be careful if you are modifying your log events (for example, by using a `remap`
 						transform) and removing the message field while doing additional parsing on it, as this
 						could lead to the encoding emitting empty strings for the given event.
+						"""
+					syslog: """
+						Syslog encoding
+						RFC 3164 and 5424 are supported
 						"""
 					text: """
 						Plain text encoding.
@@ -371,7 +519,7 @@ generated: components: sinks: azure_blob: configuration: {
 					capacity: {
 						description: """
 																Sets the capacity (in bytes) of the internal buffer used in the CSV writer.
-																This defaults to 8KB.
+																This defaults to 8192 bytes (8KB).
 																"""
 						required: false
 						type: uint: default: 8192
@@ -450,6 +598,20 @@ generated: components: sinks: azure_blob: configuration: {
 				required:    false
 				type: array: items: type: string: {}
 			}
+			gelf: {
+				description:   "The GELF Serializer Options."
+				relevant_when: "codec = \"gelf\""
+				required:      false
+				type: object: options: max_chunk_size: {
+					description: """
+						Maximum size for each GELF chunked datagram (including 12-byte header).
+						Chunking starts when datagrams exceed this size.
+						For Graylog target, keep at or below 8192 bytes; for Vector target (`gelf` decoding with `chunked_gelf` framing), up to 65,500 bytes is recommended.
+						"""
+					required: false
+					type: uint: default: 8192
+				}
+			}
 			json: {
 				description:   "Options for the JsonSerializer."
 				relevant_when: "codec = \"json\""
@@ -465,7 +627,7 @@ generated: components: sinks: azure_blob: configuration: {
 					Controls how metric tag values are encoded.
 
 					When set to `single`, only the last non-bare value of tags are displayed with the
-					metric.  When set to `full`, all metric tags are exposed as separate assignments.
+					metric. When set to `full`, all metric tags are exposed as separate assignments.
 					"""
 				relevant_when: "codec = \"json\" or codec = \"text\""
 				required:      false
@@ -507,6 +669,67 @@ generated: components: sinks: azure_blob: configuration: {
 						required:    true
 						type: string: examples: ["package.Message"]
 					}
+					use_json_names: {
+						description: """
+																Use JSON field names (camelCase) instead of protobuf field names (snake_case).
+
+																When enabled, the serializer looks for fields using their JSON names as defined
+																in the `.proto` file (for example `jobDescription` instead of `job_description`).
+
+																This is useful when working with data that has already been converted from JSON or
+																when interfacing with systems that use JSON naming conventions.
+																"""
+						required: false
+						type: bool: default: false
+					}
+				}
+			}
+			syslog: {
+				description:   "Options for the Syslog serializer."
+				relevant_when: "codec = \"syslog\""
+				required:      false
+				type: object: options: {
+					app_name: {
+						description: """
+																Path to a field in the event to use for the app name.
+
+																If not provided, the encoder checks for a semantic "service" field.
+																If that is also missing, it defaults to "vector".
+																"""
+						required: false
+						type: string: {}
+					}
+					facility: {
+						description: "Path to a field in the event to use for the facility. Defaults to \"user\"."
+						required:    false
+						type: string: {}
+					}
+					msg_id: {
+						description: "Path to a field in the event to use for the msg ID."
+						required:    false
+						type: string: {}
+					}
+					proc_id: {
+						description: "Path to a field in the event to use for the proc ID."
+						required:    false
+						type: string: {}
+					}
+					rfc: {
+						description: "RFC to use for formatting."
+						required:    false
+						type: string: {
+							default: "rfc5424"
+							enum: {
+								rfc3164: "The legacy RFC3164 syslog format."
+								rfc5424: "The modern RFC5424 syslog format."
+							}
+						}
+					}
+					severity: {
+						description: "Path to a field in the event to use for the severity. Defaults to \"informational\"."
+						required:    false
+						type: string: {}
+					}
 				}
 			}
 			timestamp_format: {
@@ -518,25 +741,10 @@ generated: components: sinks: azure_blob: configuration: {
 					unix_float: "Represent the timestamp as a Unix timestamp in floating point."
 					unix_ms:    "Represent the timestamp as a Unix timestamp in milliseconds."
 					unix_ns:    "Represent the timestamp as a Unix timestamp in nanoseconds."
-					unix_us:    "Represent the timestamp as a Unix timestamp in microseconds"
+					unix_us:    "Represent the timestamp as a Unix timestamp in microseconds."
 				}
 			}
 		}
-	}
-	endpoint: {
-		description: """
-			The Azure Blob Storage Endpoint URL.
-
-			This is used to override the default blob storage endpoint URL in cases where you are using
-			credentials read from the environment/managed identities or access tokens without using an
-			explicit connection_string (which already explicitly supports overriding the blob endpoint
-			URL).
-
-			This may only be used with `storage_account` and is ignored when used with
-			`connection_string`.
-			"""
-		required: false
-		type: string: examples: ["https://test.blob.core.usgovcloudapi.net/", "https://test.blob.core.windows.net/"]
 	}
 	framing: {
 		description: "Framing configuration."
@@ -579,6 +787,12 @@ generated: components: sinks: azure_blob: configuration: {
 					}
 				}
 			}
+			max_frame_length: {
+				description:   "Maximum frame length"
+				relevant_when: "method = \"varint_length_delimited\""
+				required:      false
+				type: uint: default: 8388608
+			}
 			method: {
 				description: "The framing method."
 				required:    true
@@ -591,6 +805,11 @@ generated: components: sinks: azure_blob: configuration: {
 						The prefix is a 32-bit unsigned integer, little endian.
 						"""
 					newline_delimited: "Event data is delimited by a newline (LF) character."
+					varint_length_delimited: """
+						Event data is prefixed with its length in bytes as a varint.
+
+						This is compatible with protobuf's length-delimited encoding.
+						"""
 				}
 			}
 		}
@@ -663,12 +882,12 @@ generated: components: sinks: azure_blob: configuration: {
 						description: """
 																Scale of RTT deviations which are not considered anomalous.
 
-																Valid values are greater than or equal to `0`, and we expect reasonable values to range from `1.0` to `3.0`.
+																Valid values are greater than or equal to `0`, and reasonable values range from `1.0` to `3.0`.
 
-																When calculating the past RTT average, we also compute a secondary “deviation” value that indicates how variable
-																those values are. We use that deviation when comparing the past RTT average to the current measurements, so we
+																When calculating the past RTT average, a secondary “deviation” value is also computed that indicates how variable
+																those values are. That deviation is used when comparing the past RTT average to the current measurements, so we
 																can ignore increases in RTT that are within an expected range. This factor is used to scale up the deviation to
-																an appropriate range.  Larger values cause the algorithm to ignore larger increases in the RTT.
+																an appropriate range. Larger values cause the algorithm to ignore larger increases in the RTT.
 																"""
 						required: false
 						type: float: default: 2.5
@@ -730,7 +949,7 @@ generated: components: sinks: azure_blob: configuration: {
 				description: """
 					The amount of time to wait before attempting the first retry for a failed request.
 
-					After the first retry has failed, the fibonacci sequence is used to select future backoffs.
+					After the first retry has failed, the Fibonacci sequence is used to select future backoffs.
 					"""
 				required: false
 				type: uint: {
@@ -781,23 +1000,17 @@ generated: components: sinks: azure_blob: configuration: {
 			}
 		}
 	}
-	storage_account: {
-		description: """
-			The Azure Blob Storage Account name.
+	tls: {
+		description: "TLS configuration."
+		required:    false
+		type: object: options: ca_file: {
+			description: """
+				Absolute path to an additional CA certificate file.
 
-			Attempts to load credentials for the account in the following ways, in order:
-
-			- read from environment variables ([more information][env_cred_docs])
-			- looks for a [Managed Identity][managed_ident_docs]
-			- uses the `az` CLI tool to get an access token ([more information][az_cli_docs])
-
-			Either `connection_string`, or this field, must be specified.
-
-			[env_cred_docs]: https://docs.rs/azure_identity/latest/azure_identity/struct.EnvironmentCredential.html
-			[managed_ident_docs]: https://docs.microsoft.com/en-us/azure/active-directory/managed-identities-azure-resources/overview
-			[az_cli_docs]: https://docs.microsoft.com/en-us/cli/azure/account?view=azure-cli-latest#az-account-get-access-token
-			"""
-		required: false
-		type: string: examples: ["mylogstorage"]
+				The certificate must be in PEM (X.509) format.
+				"""
+			required: false
+			type: string: examples: ["/path/to/certificate_authority.crt"]
+		}
 	}
 }

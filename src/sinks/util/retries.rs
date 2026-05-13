@@ -8,7 +8,7 @@ use std::{
 };
 
 use futures::FutureExt;
-use tokio::time::{sleep, Sleep};
+use tokio::time::{Sleep, sleep};
 use tower::{retry::Policy, timeout::error::Elapsed};
 use vector_lib::configurable::configurable_component;
 
@@ -33,6 +33,12 @@ pub trait RetryLogic: Clone + Send + Sync + 'static {
     /// When the Service call returns an `Err` response, this function allows
     /// implementors to specify what kinds of errors can be retried.
     fn is_retriable_error(&self, error: &Self::Error) -> bool;
+
+    /// When the Service call times out, this function allows implementors to
+    /// specify if the timeout should be retried.
+    fn is_retriable_timeout(&self) -> bool {
+        true
+    }
 
     /// When the Service call returns an `Ok` response, this function allows
     /// implementors to specify additional logic to determine if the success response
@@ -152,12 +158,11 @@ where
                         error!(
                             message = "OK/retry response but retries exhausted; dropping the request.",
                             reason = ?reason,
-                            internal_log_rate_limit = true,
                         );
                         return None;
                     }
 
-                    warn!(message = "Retrying after response.", reason = %reason, internal_log_rate_limit = true);
+                    warn!(message = "Retrying after response.", reason = %reason);
                     Some(self.build_retry())
                 }
                 RetryAction::RetryPartial(modify_request) => {
@@ -165,19 +170,15 @@ where
                         error!(
                             message =
                                 "OK/retry response but retries exhausted; dropping the request.",
-                            internal_log_rate_limit = true,
                         );
                         return None;
                     }
                     *req = modify_request(req.clone());
-                    error!(
-                        message = "OK/retrying partial after response.",
-                        internal_log_rate_limit = true
-                    );
+                    warn!("OK/retrying partial after response.");
                     Some(self.build_retry())
                 }
                 RetryAction::DontRetry(reason) => {
-                    error!(message = "Not retriable; dropping the request.", reason = ?reason, internal_log_rate_limit = true);
+                    error!(message = "Not retriable; dropping the request.", ?reason);
                     None
                 }
 
@@ -185,34 +186,39 @@ where
             },
             Err(error) => {
                 if self.remaining_attempts == 0 {
-                    error!(message = "Retries exhausted; dropping the request.", %error, internal_log_rate_limit = true);
+                    error!(message = "Retries exhausted; dropping the request.", %error);
                     return None;
                 }
 
                 if let Some(expected) = error.downcast_ref::<L::Error>() {
                     if self.logic.is_retriable_error(expected) {
                         self.logic.on_retriable_error(expected);
-                        warn!(message = "Retrying after error.", error = %expected, internal_log_rate_limit = true);
+                        warn!(message = "Retrying after error.", error = %expected);
                         Some(self.build_retry())
                     } else {
                         error!(
                             message = "Non-retriable error; dropping the request.",
                             %error,
-                            internal_log_rate_limit = true,
                         );
                         None
                     }
                 } else if error.downcast_ref::<Elapsed>().is_some() {
-                    warn!(
-                        message = "Request timed out. If this happens often while the events are actually reaching their destination, try decreasing `batch.max_bytes` and/or using `compression` if applicable. Alternatively `request.timeout_secs` can be increased.",
-                        internal_log_rate_limit = true
-                    );
-                    Some(self.build_retry())
+                    if self.logic.is_retriable_timeout() {
+                        warn!(
+                            "Request timed out. If this happens often while the events are actually reaching their destination, try decreasing `batch.max_bytes` and/or using `compression` if applicable. Alternatively `request.timeout_secs` can be increased."
+                        );
+                        Some(self.build_retry())
+                    } else {
+                        error!(
+                            message =
+                                "Request timed out and is not retriable; dropping the request."
+                        );
+                        None
+                    }
                 } else {
                     error!(
                         message = "Unexpected error type; dropping the request.",
-                        %error,
-                        internal_log_rate_limit = true
+                        %error
                     );
                     None
                 }
@@ -346,6 +352,27 @@ mod tests {
         assert_eq!(fut.await.unwrap(), "world");
     }
 
+    #[tokio::test]
+    async fn timeout_error_no_retry() {
+        trace_init();
+
+        let policy = FibonacciRetryPolicy::new(
+            5,
+            Duration::from_secs(1),
+            Duration::from_secs(10),
+            NoTimeoutRetryLogic,
+            JitterMode::None,
+        );
+
+        let (mut svc, mut handle) = mock::spawn_layer(RetryLayer::new(policy));
+
+        assert_ready_ok!(svc.poll_ready());
+
+        let mut fut = task::spawn(svc.call("hello"));
+        assert_request_eq!(handle, "hello").send_error(Elapsed::new());
+        assert_ready_err!(fut.poll());
+    }
+
     #[test]
     fn backoff_grows_to_max() {
         let mut policy = FibonacciRetryPolicy::new(
@@ -430,6 +457,23 @@ mod tests {
 
         fn is_retriable_error(&self, error: &Self::Error) -> bool {
             error.0
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct NoTimeoutRetryLogic;
+
+    impl RetryLogic for NoTimeoutRetryLogic {
+        type Error = Error;
+        type Request = &'static str;
+        type Response = &'static str;
+
+        fn is_retriable_error(&self, error: &Self::Error) -> bool {
+            error.0
+        }
+
+        fn is_retriable_timeout(&self) -> bool {
+            false
         }
     }
 

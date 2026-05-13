@@ -1,15 +1,15 @@
-use std::{error::Error, num::NonZeroUsize};
+use std::error::Error;
 
 use async_trait::async_trait;
 
 use crate::{
+    Bufferable,
     buffer_usage_data::BufferUsageHandle,
     config::MemoryBufferSize,
     topology::{
         builder::IntoBuffer,
-        channel::{limited, ReceiverAdapter, SenderAdapter},
+        channel::{ReceiverAdapter, SenderAdapter, limited},
     },
-    Bufferable,
 };
 
 pub struct MemoryBuffer {
@@ -21,7 +21,8 @@ impl MemoryBuffer {
         MemoryBuffer { capacity }
     }
 
-    pub fn with_max_events(n: NonZeroUsize) -> Self {
+    #[cfg(test)]
+    pub fn with_max_events(n: std::num::NonZeroUsize) -> Self {
         Self {
             capacity: MemoryBufferSize::MaxEvents(n),
         }
@@ -44,7 +45,7 @@ where
 
         usage_handle.set_buffer_limits(max_bytes, max_size);
 
-        let (tx, rx) = limited(self.capacity);
+        let (tx, rx) = limited(self.capacity, None, None);
         Ok((tx.into(), rx.into()))
     }
 }

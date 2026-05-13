@@ -1,49 +1,49 @@
 use std::{
     convert::Infallible,
     hash::Hash,
-    mem::{discriminant, Discriminant},
+    mem::{Discriminant, discriminant},
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
 
 use async_trait::async_trait;
-use base64::prelude::{Engine as _, BASE64_STANDARD};
-use futures::{future, stream::BoxStream, FutureExt, StreamExt};
+use base64::prelude::{BASE64_STANDARD, Engine as _};
+use futures::{FutureExt, StreamExt, future, stream::BoxStream};
 use hyper::{
+    Body, Method, Request, Response, Server, StatusCode,
     body::HttpBody,
     header::HeaderValue,
     service::{make_service_fn, service_fn},
-    Body, Method, Request, Response, Server, StatusCode,
 };
-use indexmap::{map::Entry, IndexMap};
+use indexmap::{IndexMap, map::Entry};
 use serde_with::serde_as;
 use snafu::Snafu;
 use stream_cancel::{Trigger, Tripwire};
 use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
 use tracing::{Instrument, Span};
-use vector_lib::configurable::configurable_component;
 use vector_lib::{
+    ByteSizeOf, EstimatedJsonEncodedSizeOf,
+    configurable::configurable_component,
     internal_event::{
         ByteSize, BytesSent, CountByteSize, EventsSent, InternalEventHandle as _, Output, Protocol,
         Registered,
     },
-    ByteSizeOf, EstimatedJsonEncodedSizeOf,
 };
 
 use super::collector::{MetricCollector, StringCollector};
 use crate::{
     config::{AcknowledgementsConfig, GenerateConfig, Input, Resource, SinkConfig, SinkContext},
     event::{
-        metric::{Metric, MetricData, MetricKind, MetricSeries, MetricValue},
         Event, EventStatus, Finalizable,
+        metric::{Metric, MetricData, MetricKind, MetricSeries, MetricValue},
     },
-    http::{build_http_trace_layer, Auth},
+    http::{Auth, build_http_trace_layer},
     internal_events::PrometheusNormalizationError,
     sinks::{
-        util::{statistic::validate_quantiles, StreamSink},
         Healthcheck, VectorSink,
+        util::{StreamSink, statistic::validate_quantiles},
     },
     tls::{MaybeTlsSettings, TlsEnableableConfig},
 };
@@ -323,14 +323,15 @@ fn authorized<T: HttpBody>(req: &Request<T>, auth: &Option<Auth>) -> bool {
                 Auth::Bearer { token } => Some(HeaderValue::from_str(
                     format!("Bearer {}", token.inner()).as_str(),
                 )),
+                Auth::Custom { value } => Some(HeaderValue::from_str(value)),
                 #[cfg(feature = "aws-core")]
                 _ => None,
             };
 
-            if let Some(Ok(encoded_credentials)) = encoded_credentials {
-                if auth_header == encoded_credentials {
-                    return true;
-                }
+            if let Some(Ok(encoded_credentials)) = encoded_credentials
+                && auth_header == encoded_credentials
+            {
+                return true;
             }
         }
     } else {
@@ -600,12 +601,13 @@ impl StreamSink<Event> for PrometheusExporter {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+
     use chrono::{Duration, Utc};
     use flate2::read::GzDecoder;
     use futures::stream;
     use indoc::indoc;
     use similar_asserts::assert_eq;
-    use std::io::Read;
     use tokio::{sync::oneshot::error::TryRecvError, time};
     use vector_lib::{
         event::{MetricTags, StatisticKind},
@@ -621,8 +623,9 @@ mod tests {
         http::HttpClient,
         sinks::prometheus::{distribution_to_agg_histogram, distribution_to_ddsketch},
         test_util::{
-            components::{run_and_assert_sink_compliance, SINK_TAGS},
-            next_addr, random_string, trace_init,
+            addr::next_addr,
+            components::{SINK_TAGS, run_and_assert_sink_compliance},
+            random_string, trace_init,
         },
         tls::MaybeTlsSettings,
     };
@@ -901,7 +904,7 @@ mod tests {
         let client_settings = MaybeTlsSettings::from_config(tls_config.as_ref(), false).unwrap();
         let proto = client_settings.http_protocol_name();
 
-        let address = next_addr();
+        let (_guard, address) = next_addr();
         let config = PrometheusExporterConfig {
             address,
             tls: tls_config,
@@ -951,15 +954,18 @@ mod tests {
         assert!(result.status().is_success());
 
         if encoding.is_some() {
-            assert!(result
-                .headers()
-                .contains_key(http::header::CONTENT_ENCODING));
+            assert!(
+                result
+                    .headers()
+                    .contains_key(http::header::CONTENT_ENCODING)
+            );
         }
 
         let body = result.into_body();
-        let bytes = hyper::body::to_bytes(body)
+        let bytes = http_body::Body::collect(body)
             .await
-            .expect("Reading body failed");
+            .expect("Reading body failed")
+            .to_bytes();
 
         sink_handle.await.unwrap();
 
@@ -986,7 +992,7 @@ mod tests {
         let client_settings = MaybeTlsSettings::from_config(None, false).unwrap();
         let proto = client_settings.http_protocol_name();
 
-        let address = next_addr();
+        let (_guard, address) = next_addr();
         let config = PrometheusExporterConfig {
             address,
             auth: server_auth_config,
@@ -1036,9 +1042,10 @@ mod tests {
         }
 
         let body = result.into_body();
-        let bytes = hyper::body::to_bytes(body)
+        let bytes = http_body::Body::collect(body)
             .await
-            .expect("Reading body failed");
+            .expect("Reading body failed")
+            .to_bytes();
         let result = String::from_utf8(bytes.to_vec()).unwrap();
 
         sink_handle.await.unwrap();
@@ -1102,8 +1109,9 @@ mod tests {
 
     #[tokio::test]
     async fn sink_absolute() {
+        let (_guard, address) = next_addr();
         let config = PrometheusExporterConfig {
-            address: next_addr(), // Not actually bound, just needed to fill config
+            address,
             tls: None,
             ..Default::default()
         };
@@ -1155,8 +1163,9 @@ mod tests {
         // are the same -- without loss of accuracy.
 
         // This expects that the default for the sink is to render distributions as aggregated histograms.
+        let (_guard, address) = next_addr();
         let config = PrometheusExporterConfig {
-            address: next_addr(), // Not actually bound, just needed to fill config
+            address,
             tls: None,
             ..Default::default()
         };
@@ -1183,7 +1192,7 @@ mod tests {
             },
         );
 
-        let metrics = vec![
+        let metrics = [
             base_summary_metric.clone(),
             base_summary_metric
                 .clone()
@@ -1274,8 +1283,9 @@ mod tests {
         //
         // The render code is actually what will end up rendering those sketches as aggregated
         // summaries in the scrape output.
+        let (_guard, address) = next_addr();
         let config = PrometheusExporterConfig {
-            address: next_addr(), // Not actually bound, just needed to fill config
+            address,
             tls: None,
             distributions_as_summaries: true,
             ..Default::default()
@@ -1302,7 +1312,7 @@ mod tests {
             },
         );
 
-        let metrics = vec![
+        let metrics = [
             base_summary_metric.clone(),
             base_summary_metric
                 .clone()
@@ -1383,8 +1393,9 @@ mod tests {
 
         // This test ensures that this normalization works correctly when applied to a mix of both
         // Incremental and Absolute inputs.
+        let (_guard, address) = next_addr();
         let config = PrometheusExporterConfig {
-            address: next_addr(), // Not actually bound, just needed to fill config
+            address,
             tls: None,
             ..Default::default()
         };
@@ -1403,7 +1414,7 @@ mod tests {
             MetricValue::Gauge { value: -10.0 },
         );
 
-        let metrics = vec![
+        let metrics = [
             base_absolute_gauge_metric.clone(),
             base_absolute_gauge_metric
                 .clone()
@@ -1462,7 +1473,7 @@ mod integration_tests {
         config::ProxyConfig,
         http::HttpClient,
         test_util::{
-            components::{run_and_assert_sink_compliance, SINK_TAGS},
+            components::{SINK_TAGS, run_and_assert_sink_compliance},
             trace_init,
         },
     };
@@ -1486,9 +1497,10 @@ mod integration_tests {
             .send(request)
             .await
             .expect("Could not send request");
-        let result = hyper::body::to_bytes(result.into_body())
+        let result = http_body::Body::collect(result.into_body())
             .await
-            .expect("Error fetching body");
+            .expect("Error fetching body")
+            .to_bytes();
         String::from_utf8_lossy(&result).to_string()
     }
 
@@ -1507,9 +1519,10 @@ mod integration_tests {
             .send(request)
             .await
             .expect("Could not fetch query");
-        let result = hyper::body::to_bytes(result.into_body())
+        let result = http_body::Body::collect(result.into_body())
             .await
-            .expect("Error fetching body");
+            .expect("Error fetching body")
+            .to_bytes();
         let result = String::from_utf8_lossy(&result);
         serde_json::from_str(result.as_ref()).expect("Invalid JSON from prometheus")
     }

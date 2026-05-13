@@ -1,7 +1,9 @@
-use metrics::counter;
-use vector_lib::internal_event::{error_stage, error_type};
-use vector_lib::internal_event::{ComponentEventsDropped, InternalEvent, UNINTENTIONAL};
+use vector_lib::internal_event::{
+    ComponentEventsDropped, CounterName, InternalEvent, UNINTENTIONAL, error_stage, error_type,
+};
+use vector_lib::{NamedInternalEvent, counter};
 
+#[derive(NamedInternalEvent)]
 pub struct PairExpansionError<'a> {
     pub key: &'a str,
     pub value: &'a str,
@@ -19,11 +21,10 @@ impl InternalEvent for PairExpansionError<'_> {
                 error = %self.error,
                 error_type = error_type::PARSER_FAILED,
                 stage = error_stage::PROCESSING,
-                internal_log_rate_limit = true,
             );
 
             counter!(
-                "component_errors_total",
+                CounterName::ComponentErrorsTotal,
                 "error_type" => error_type::PARSER_FAILED,
                 "stage" => error_stage::PROCESSING,
             )
@@ -39,7 +40,6 @@ impl InternalEvent for PairExpansionError<'_> {
                 error = %self.error,
                 error_type = error_type::PARSER_FAILED,
                 stage = error_stage::PROCESSING,
-                internal_log_rate_limit = true,
             );
         }
     }

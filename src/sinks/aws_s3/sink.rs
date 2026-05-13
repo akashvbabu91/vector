@@ -3,12 +3,10 @@ use std::io;
 use bytes::Bytes;
 use chrono::{FixedOffset, Utc};
 use uuid::Uuid;
-use vector_lib::codecs::encoding::Framer;
-use vector_lib::event::Finalizable;
-use vector_lib::request_metadata::RequestMetadata;
+use vector_lib::{codecs::EncoderKind, event::Finalizable, request_metadata::RequestMetadata};
 
 use crate::{
-    codecs::{Encoder, Transformer},
+    codecs::Transformer,
     event::Event,
     sinks::{
         s3_common::{
@@ -17,8 +15,8 @@ use crate::{
             service::{S3Metadata, S3Request},
         },
         util::{
-            metadata::RequestMetadataBuilder, request_builder::EncodeResult, Compression,
-            RequestBuilder,
+            Compression, RequestBuilder, metadata::RequestMetadataBuilder,
+            request_builder::EncodeResult,
         },
     },
 };
@@ -30,7 +28,7 @@ pub struct S3RequestOptions {
     pub filename_append_uuid: bool,
     pub filename_extension: Option<String>,
     pub api_options: S3Options,
-    pub encoder: (Transformer, Encoder<Framer>),
+    pub encoder: (Transformer, EncoderKind),
     pub compression: Compression,
     pub filename_tz_offset: Option<FixedOffset>,
 }
@@ -38,7 +36,7 @@ pub struct S3RequestOptions {
 impl RequestBuilder<(S3PartitionKey, Vec<Event>)> for S3RequestOptions {
     type Metadata = S3Metadata;
     type Events = Vec<Event>;
-    type Encoder = (Transformer, Encoder<Framer>);
+    type Encoder = (Transformer, EncoderKind);
     type Payload = Bytes;
     type Request = S3Request;
     type Error = io::Error; // TODO: this is ugly.

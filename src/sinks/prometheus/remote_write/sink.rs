@@ -1,15 +1,16 @@
 use std::fmt;
 
-use vector_lib::byte_size_of::ByteSizeOf;
-use vector_lib::event::Metric;
-use vector_lib::stream::batcher::{data::BatchData, limiter::ByteSizeOfItemSize};
-
-use crate::sinks::{prelude::*, util::buffer::metrics::MetricSet};
+use vector_lib::{
+    byte_size_of::ByteSizeOf,
+    event::Metric,
+    stream::batcher::{data::BatchData, limiter::ByteSizeOfItemSize},
+};
 
 use super::{
-    request_builder::{RemoteWriteEncoder, RemoteWriteRequest, RemoteWriteRequestBuilder},
     PartitionKey, PrometheusMetricNormalize,
+    request_builder::{RemoteWriteEncoder, RemoteWriteRequest, RemoteWriteRequestBuilder},
 };
+use crate::sinks::{prelude::*, util::buffer::metrics::MetricSet};
 
 pub(super) struct RemoteWriteMetric {
     pub(super) metric: Metric,
@@ -181,10 +182,14 @@ where
             .filter_map(move |event| {
                 future::ready(make_remote_write_event(tenant_id.as_ref(), event))
             })
-            .batched_partitioned(PrometheusTenantIdPartitioner, || {
-                batch_settings
-                    .as_reducer_config(ByteSizeOfItemSize, EventCollection::new(self.aggregate))
-            })
+            .batched_partitioned(
+                PrometheusTenantIdPartitioner,
+                batch_settings.timeout,
+                |_| {
+                    batch_settings
+                        .as_reducer_config(ByteSizeOfItemSize, EventCollection::new(self.aggregate))
+                },
+            )
             .request_builder(default_request_builder_concurrency_limit(), request_builder)
             .filter_map(|request| async move {
                 match request {

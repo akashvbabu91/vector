@@ -1,28 +1,31 @@
+use std::time::Duration;
+
+use async_nats::jetstream::stream::StorageType;
+use futures_util::StreamExt;
+use serde::Deserialize;
+use snafu::ResultExt;
+use vector_lib::{
+    codecs::{JsonSerializerConfig, TextSerializerConfig},
+    event::{EventArray, LogEvent},
+};
+use vrl::value;
+
 use super::{
+    ConfigSnafu, NatsError,
     config::{NatsHeaderConfig, NatsSinkConfig},
     sink::NatsSink,
-    ConfigSnafu, NatsError,
 };
 use crate::{
     nats::{
         NatsAuthConfig, NatsAuthCredentialsFile, NatsAuthNKey, NatsAuthToken, NatsAuthUserPassword,
     },
-    sinks::nats::config::JetStreamConfig,
-    sinks::prelude::*,
+    sinks::{nats::config::JetStreamConfig, prelude::*},
     test_util::{
-        components::{run_and_assert_sink_compliance, SINK_TAGS},
+        components::{SINK_TAGS, run_and_assert_sink_compliance},
         random_lines_with_stream, random_string, trace_init,
     },
     tls::TlsEnableableConfig,
 };
-use async_nats::jetstream::stream::StorageType;
-use futures_util::StreamExt;
-use serde::Deserialize;
-use snafu::ResultExt;
-use std::time::Duration;
-use vector_lib::codecs::{JsonSerializerConfig, TextSerializerConfig};
-use vector_lib::event::{EventArray, LogEvent};
-use vrl::value;
 
 fn generate_sink_config(url: &str, subject: &str) -> NatsSinkConfig {
     NatsSinkConfig {
@@ -249,7 +252,7 @@ async fn nats_tls_valid() {
     conf.tls = Some(TlsEnableableConfig {
         enabled: Some(true),
         options: TlsConfig {
-            ca_file: Some("tests/data/nats/rootCA.pem".into()),
+            ca_file: Some("tests/integration/nats/data/rootCA.pem".into()),
             ..Default::default()
         },
     });
@@ -290,9 +293,9 @@ async fn nats_tls_client_cert_valid() {
     conf.tls = Some(TlsEnableableConfig {
         enabled: Some(true),
         options: TlsConfig {
-            ca_file: Some("tests/data/nats/rootCA.pem".into()),
-            crt_file: Some("tests/data/nats/nats-client.pem".into()),
-            key_file: Some("tests/data/nats/nats-client.key".into()),
+            ca_file: Some("tests/integration/nats/data/rootCA.pem".into()),
+            crt_file: Some("tests/integration/nats/data/nats-client.pem".into()),
+            key_file: Some("tests/integration/nats/data/nats-client.key".into()),
             ..Default::default()
         },
     });
@@ -316,7 +319,7 @@ async fn nats_tls_client_cert_invalid() {
     conf.tls = Some(TlsEnableableConfig {
         enabled: Some(true),
         options: TlsConfig {
-            ca_file: Some("tests/data/nats/rootCA.pem".into()),
+            ca_file: Some("tests/integration/nats/data/rootCA.pem".into()),
             ..Default::default()
         },
     });
@@ -340,13 +343,13 @@ async fn nats_tls_jwt_auth_valid() {
     conf.tls = Some(TlsEnableableConfig {
         enabled: Some(true),
         options: TlsConfig {
-            ca_file: Some("tests/data/nats/rootCA.pem".into()),
+            ca_file: Some("tests/integration/nats/data/rootCA.pem".into()),
             ..Default::default()
         },
     });
     conf.auth = Some(NatsAuthConfig::CredentialsFile {
         credentials_file: NatsAuthCredentialsFile {
-            path: "tests/data/nats/nats.creds".into(),
+            path: "tests/integration/nats/data/nats.creds".into(),
         },
     });
 
@@ -369,20 +372,20 @@ async fn nats_tls_jwt_auth_invalid() {
     conf.tls = Some(TlsEnableableConfig {
         enabled: Some(true),
         options: TlsConfig {
-            ca_file: Some("tests/data/nats/rootCA.pem".into()),
+            ca_file: Some("tests/integration/nats/data/rootCA.pem".into()),
             ..Default::default()
         },
     });
     conf.auth = Some(NatsAuthConfig::CredentialsFile {
         credentials_file: NatsAuthCredentialsFile {
-            path: "tests/data/nats/nats-bad.creds".into(),
+            path: "tests/integration/nats/data/nats-bad.creds".into(),
         },
     });
 
     let r = publish_and_check(conf).await;
     assert!(
-        matches!(r, Err(NatsError::Connect { .. })),
-        "publish_and_check failed, expected NatsError::Connect, got: {r:?}"
+        matches!(r, Err(NatsError::Config { .. })),
+        "publish_and_check failed, expected NatsError::Config, got: {r:?}"
     );
 }
 

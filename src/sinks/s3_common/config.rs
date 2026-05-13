@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
 
 use aws_sdk_s3::{
+    Client as S3Client,
     operation::put_object::PutObjectError,
     types::{ObjectCannedAcl, ServerSideEncryption, StorageClass},
-    Client as S3Client,
 };
 use aws_smithy_runtime_api::{
     client::{orchestrator::HttpResponse, result::SdkError},
@@ -15,11 +15,11 @@ use vector_lib::configurable::configurable_component;
 
 use super::service::{S3Request, S3Response, S3Service};
 use crate::{
-    aws::{create_client, is_retriable_error, AwsAuthentication, RegionOrEndpoint},
+    aws::{AwsAuthentication, RegionOrEndpoint, create_client, is_retriable_error},
     common::s3::S3ClientBuilder,
     config::ProxyConfig,
     http::status,
-    sinks::{util::retries::RetryLogic, Healthcheck},
+    sinks::{Healthcheck, util::retries::RetryLogic},
     tls::TlsConfig,
 };
 
@@ -141,12 +141,11 @@ fn example_tags() -> HashMap<String, String> {
 ///
 /// [aws_docs]: https://docs.aws.amazon.com/AmazonS3/latest/userguide/storage-class-intro.html
 #[configurable_component]
-#[derive(Clone, Copy, Debug, Derivative, PartialEq, Eq)]
-#[derivative(Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum S3StorageClass {
     /// Standard Redundancy.
-    #[derivative(Default)]
+    #[default]
     Standard,
 
     /// Reduced Redundancy.
@@ -228,8 +227,7 @@ impl From<S3ServerSideEncryption> for ServerSideEncryption {
 ///
 /// [canned_acl]: https://docs.aws.amazon.com/AmazonS3/latest/dev/acl-overview.html#canned-acl
 #[configurable_component]
-#[derive(Clone, Copy, Debug, Derivative)]
-#[derivative(Default)]
+#[derive(Clone, Copy, Debug, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum S3CannedAcl {
     /// Bucket/object are private.
@@ -238,7 +236,7 @@ pub enum S3CannedAcl {
     /// access.
     ///
     /// This is the default.
-    #[derivative(Default)]
+    #[default]
     Private,
 
     /// Bucket/object can be read publicly.
@@ -345,8 +343,22 @@ fn should_retry_error(
 #[configurable(metadata(docs::enum_tag_description = "The retry strategy enum."))]
 pub enum RetryStrategy {
     /// Don't retry any errors
-    #[default]
     None,
+
+    /// Default strategy. The following error types will be retried:
+    /// - `TimeoutError`
+    /// - `DispatchFailure`
+    /// - `ResponseError` or `ServiceError` when:
+    ///   - HTTP status is 5xx
+    ///   - Status is 429 (Too Many Requests)
+    ///   - `x-amz-retry-after` header is present
+    ///   - HTTP status is 4xx and response body contains one of:
+    ///     - `"RequestTimeout"`
+    ///     - `"RequestExpired"`
+    ///     - `"ThrottlingException"`
+    /// - Fallback: Any unknown error variant
+    #[default]
+    Default,
 
     /// Retry on *all* errors
     All,
@@ -366,6 +378,7 @@ impl RetryLogic for RetryStrategy {
     fn is_retriable_error(&self, error: &Self::Error) -> bool {
         match self {
             RetryStrategy::None => false,
+            RetryStrategy::Default => is_retriable_error(error),
             RetryStrategy::All => true,
             RetryStrategy::Custom { status_codes } => {
                 is_retriable_error(error) || should_retry_error(Some(status_codes.clone()), error)

@@ -1,13 +1,14 @@
 //! The main tower service that takes the request created by the request builder
 //! and sends it to `AMQP`.
-use crate::sinks::prelude::*;
-use bytes::Bytes;
-use futures::future::BoxFuture;
-use lapin::{options::BasicPublishOptions, BasicProperties};
-use snafu::Snafu;
 use std::task::{Context, Poll};
 
+use bytes::Bytes;
+use futures::future::BoxFuture;
+use lapin::{BasicProperties, options::BasicPublishOptions};
+use snafu::Snafu;
+
 use super::channel::AmqpSinkChannels;
+use crate::sinks::prelude::*;
 
 /// The request contains the data to send to `AMQP` together
 /// with the information need to route the message.
@@ -95,8 +96,8 @@ pub enum AmqpError {
     #[snafu(display("Failed to open AMQP channel: {}", error))]
     ConnectFailed { error: vector_common::Error },
 
-    #[snafu(display("Channel is not writeable: {:?}", state))]
-    ChannelClosed { state: lapin::ChannelState },
+    #[snafu(display("Channel is not writeable: {:?}", status))]
+    ChannelClosed { status: lapin::ChannelStatus },
 
     #[snafu(display("Channel pool error: {}", error))]
     PoolError { error: vector_common::Error },
@@ -124,8 +125,8 @@ impl Service<AmqpRequest> for AmqpService {
             let byte_size = req.body.len();
             let fut = channel
                 .basic_publish(
-                    &req.exchange,
-                    &req.routing_key,
+                    req.exchange.clone().into(),
+                    req.routing_key.clone().into(),
                     BasicPublishOptions::default(),
                     req.body.as_ref(),
                     req.properties,
@@ -134,7 +135,7 @@ impl Service<AmqpRequest> for AmqpService {
 
             match fut {
                 Ok(result) => match result.await {
-                    Ok(lapin::publisher_confirm::Confirmation::Nack(_)) => Err(AmqpError::Nack),
+                    Ok(lapin::Confirmation::Nack(_)) => Err(AmqpError::Nack),
                     Err(error) => Err(AmqpError::AcknowledgementFailed { error }),
                     Ok(_) => Ok(AmqpResponse {
                         json_size: req.metadata.into_events_estimated_json_encoded_byte_size(),

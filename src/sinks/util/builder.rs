@@ -1,6 +1,3 @@
-use futures_util::{stream::Map, Stream, StreamExt};
-use pin_project::pin_project;
-use std::time::Duration;
 use std::{
     convert::Infallible,
     fmt,
@@ -10,21 +7,25 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
+    time::Duration,
 };
+
+use futures_util::{Stream, StreamExt, stream::Map};
+use pin_project::pin_project;
 use tower::Service;
 use tracing::Span;
-use vector_lib::stream::{
-    batcher::{config::BatchConfig, Batcher},
-    ConcurrentMap, Driver, DriverResponse, ExpirationQueue, PartitionedBatcher,
-};
 use vector_lib::{
+    ByteSizeOf,
     event::{Finalizable, Metric},
     partition::Partitioner,
-    ByteSizeOf,
+    stream::{
+        ConcurrentMap, Driver, DriverResponse, ExpirationQueue, PartitionedBatcher,
+        batcher::{Batcher, config::BatchConfig},
+    },
 };
 
 use super::{
-    buffer::metrics::MetricNormalize, IncrementalRequestBuilder, Normalizer, RequestBuilder,
+    IncrementalRequestBuilder, Normalizer, RequestBuilder, buffer::metrics::MetricNormalize,
 };
 
 impl<T: ?Sized> SinkBuilderExt for T where T: Stream {}
@@ -45,9 +46,13 @@ pub trait SinkBuilderExt: Stream {
     /// The stream will yield batches of events, with their partition key, when either a batch fills
     /// up or times out. [`Partitioner`] operates on a per-event basis, and has access to the event
     /// itself, and so can access any and all fields of an event.
+    ///
+    /// The `settings` closure receives the partition key for each new partition, allowing callers
+    /// to vary the batch configuration (e.g. byte size limit) per partition.
     fn batched_partitioned<P, C, F, B>(
         self,
         partitioner: P,
+        timeout: Duration,
         settings: F,
     ) -> PartitionedBatcher<Self, P, ExpirationQueue<P::Key>, C, F, B>
     where
@@ -56,9 +61,9 @@ pub trait SinkBuilderExt: Stream {
         P::Key: Eq + Hash + Clone,
         P::Item: ByteSizeOf,
         C: BatchConfig<P::Item>,
-        F: Fn() -> C + Send,
+        F: Fn(&P::Key) -> C + Send,
     {
-        PartitionedBatcher::new(self, partitioner, settings)
+        PartitionedBatcher::new(self, partitioner, timeout, settings)
     }
 
     /// Batches the stream based on the given batch settings and item size calculator.

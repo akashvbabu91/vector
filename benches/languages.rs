@@ -1,8 +1,10 @@
-use criterion::{criterion_group, criterion_main, BatchSize, Criterion, SamplingMode, Throughput};
+use criterion::{BatchSize, Criterion, SamplingMode, Throughput, criterion_group, criterion_main};
 use indoc::indoc;
 use vector::{
     config,
-    test_util::{next_addr, runtime, send_lines, start_topology, wait_for_tcp, CountReceiver},
+    test_util::{
+        CountReceiver, addr::next_addr, runtime, send_lines, start_topology, wait_for_tcp,
+    },
 };
 
 criterion_group!(
@@ -253,8 +255,8 @@ fn benchmark_configs(
     let _ = output;
 
     let num_lines = 10_000;
-    let in_addr = next_addr();
-    let out_addr = next_addr();
+    let (_guard_0, in_addr) = next_addr();
+    let (_guard_1, out_addr) = next_addr();
 
     let lines: Vec<_> = std::iter::repeat_n(input.to_string(), num_lines).collect();
 

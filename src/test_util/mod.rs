@@ -1,27 +1,27 @@
 #![allow(missing_docs)]
+
 use std::{
     collections::HashMap,
     convert::Infallible,
     fs::File,
-    future::{ready, Future},
+    future::{Future, ready},
     io::Read,
     iter,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    net::SocketAddr,
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 use chrono::{DateTime, SubsecRound, Utc};
 use flate2::read::MultiGzDecoder;
-use futures::{stream, task::noop_waker_ref, FutureExt, SinkExt, Stream, StreamExt, TryStreamExt};
+use futures::{FutureExt, SinkExt, Stream, StreamExt, TryStreamExt, stream, task::noop_waker_ref};
 use openssl::ssl::{SslConnector, SslFiletype, SslMethod, SslVerifyMode};
-use portpicker::pick_unused_port;
-use rand::{rng, Rng};
+use rand::{Rng, rng};
 use rand_distr::Alphanumeric;
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt, Result as IoResult},
@@ -29,18 +29,18 @@ use tokio::{
     runtime,
     sync::oneshot,
     task::JoinHandle,
-    time::{sleep, Duration, Instant},
+    time::{Duration, Instant, sleep},
 };
 use tokio_stream::wrappers::TcpListenerStream;
 #[cfg(unix)]
 use tokio_stream::wrappers::UnixListenerStream;
 use tokio_util::codec::{Encoder, FramedRead, FramedWrite, LinesCodec};
-use vector_lib::event::{
-    BatchNotifier, BatchStatusReceiver, Event, EventArray, LogEvent, MetricTags, MetricValue,
-};
 use vector_lib::{
     buffers::topology::channel::LimitedReceiver,
-    event::{Metric, MetricKind},
+    event::{
+        BatchNotifier, BatchStatusReceiver, Event, EventArray, LogEvent, Metric, MetricKind,
+        MetricTags, MetricValue,
+    },
 };
 #[cfg(test)]
 use zstd::Decoder as ZstdDecoder;
@@ -55,23 +55,20 @@ const WAIT_FOR_SECS: u64 = 5; // The default time to wait in `wait_for`
 const WAIT_FOR_MIN_MILLIS: u64 = 5; // The minimum time to pause before retrying
 const WAIT_FOR_MAX_MILLIS: u64 = 500; // The maximum time to pause before retrying
 
-#[cfg(any(test, feature = "test-utils"))]
-pub mod components;
-
-#[cfg(test)]
-pub mod http;
-
-#[cfg(test)]
-pub mod metrics;
-
-#[cfg(test)]
-pub mod mock;
-
+pub mod addr;
 pub mod compression;
 pub mod stats;
 
+#[cfg(any(test, feature = "test-utils"))]
+pub mod components;
+#[cfg(test)]
+pub mod http;
 #[cfg(test)]
 pub mod integration;
+#[cfg(test)]
+pub mod metrics;
+#[cfg(test)]
+pub mod mock;
 
 #[macro_export]
 macro_rules! assert_downcast_matches {
@@ -109,29 +106,9 @@ where
 }
 
 pub fn open_fixture(path: impl AsRef<Path>) -> crate::Result<serde_json::Value> {
-    let test_file = match File::open(path) {
-        Ok(file) => file,
-        Err(e) => return Err(e.into()),
-    };
+    let test_file = File::open(path)?;
     let value: serde_json::Value = serde_json::from_reader(test_file)?;
     Ok(value)
-}
-
-pub fn next_addr_for_ip(ip: IpAddr) -> SocketAddr {
-    let port = pick_unused_port(ip);
-    SocketAddr::new(ip, port)
-}
-
-pub fn next_addr() -> SocketAddr {
-    next_addr_for_ip(IpAddr::V4(Ipv4Addr::LOCALHOST))
-}
-
-pub fn next_addr_any() -> SocketAddr {
-    next_addr_for_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
-}
-
-pub fn next_addr_v6() -> SocketAddr {
-    next_addr_for_ip(IpAddr::V6(Ipv6Addr::LOCALHOST))
 }
 
 pub fn trace_init() {
@@ -139,13 +116,17 @@ pub fn trace_init() {
     let color = {
         use std::io::IsTerminal;
         std::io::stdout().is_terminal()
+            || std::env::var("NEXTEST")
+                .ok()
+                .and(Some(true))
+                .unwrap_or(false)
     };
     // Windows: ANSI colors are not supported by cmd.exe
     // Color is false for everything except unix.
     #[cfg(not(unix))]
     let color = false;
 
-    let levels = std::env::var("TEST_LOG").unwrap_or_else(|_| "error".to_string());
+    let levels = std::env::var("VECTOR_LOG").unwrap_or_else(|_| "error".to_string());
 
     trace::init(color, false, &levels, 10);
 

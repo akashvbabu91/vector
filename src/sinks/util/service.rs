@@ -3,14 +3,14 @@ use std::{hash::Hash, marker::PhantomData, num::NonZeroU64, pin::Pin, sync::Arc,
 use futures_util::stream::{self, BoxStream};
 use serde_with::serde_as;
 use tower::{
+    Service, ServiceBuilder,
     balance::p2c::Balance,
     buffer::{Buffer, BufferLayer},
     discover::Change,
-    layer::{util::Stack, Layer},
+    layer::{Layer, util::Stack},
     limit::RateLimit,
     retry::Retry,
     timeout::Timeout,
-    Service, ServiceBuilder,
 };
 use vector_lib::configurable::configurable_component;
 
@@ -22,13 +22,13 @@ pub use crate::sinks::util::service::{
 use crate::{
     internal_events::OpenGauge,
     sinks::util::{
+        Batch, BatchSink, Partition, PartitionBatchSink,
         adaptive_concurrency::{
             AdaptiveConcurrencyLimit, AdaptiveConcurrencyLimitLayer, AdaptiveConcurrencySettings,
         },
         retries::{FibonacciRetryPolicy, JitterMode, RetryLogic},
         service::map::MapLayer,
         sink::Response,
-        Batch, BatchSink, Partition, PartitionBatchSink,
     },
 };
 
@@ -151,7 +151,7 @@ pub struct TowerRequestConfig<D: TowerRequestConfigDefaults = GlobalTowerRequest
 
     /// The amount of time to wait before attempting the first retry for a failed request.
     ///
-    /// After the first retry has failed, the fibonacci sequence is used to select future backoffs.
+    /// After the first retry has failed, the Fibonacci sequence is used to select future backoffs.
     #[configurable(metadata(docs::type_unit = "seconds"))]
     #[configurable(metadata(docs::human_name = "Retry Initial Backoff"))]
     #[serde(default = "default_retry_initial_backoff_secs::<D>")]
@@ -407,18 +407,18 @@ where
 #[cfg(test)]
 mod tests {
     use std::sync::{
-        atomic::{AtomicBool, Ordering::AcqRel},
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering::AcqRel},
     };
 
-    use futures::{future, stream, FutureExt, SinkExt, StreamExt};
+    use futures::{FutureExt, SinkExt, StreamExt, future, stream};
     use tokio::time::Duration;
     use vector_lib::json_size::JsonSize;
 
     use super::*;
     use crate::sinks::util::{
-        retries::{RetryAction, RetryLogic},
         BatchSettings, EncodedEvent, PartitionBuffer, PartitionInnerBuffer, VecBuffer,
+        retries::{RetryAction, RetryLogic},
     };
 
     const TIMEOUT: Duration = Duration::from_secs(10);
